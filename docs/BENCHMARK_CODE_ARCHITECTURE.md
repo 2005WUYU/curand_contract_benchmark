@@ -13,8 +13,21 @@ This repository keeps benchmark logic split by responsibility instead of by outp
   - Changes here affect what can become a formal result.
 
 - `contract_benchmark/runner.py`
-  - Task dispatch and concrete benchmark task implementations.
-  - This file should contain benchmark operations, not environment capture or report summarization.
+  - Task dispatch only: metadata tasks, capability matrix handling, task_id-to-runner mapping, and final record gates.
+  - This file should stay small. Concrete benchmark operations live under `contract_benchmark/tasks/`.
+
+- `contract_benchmark/tasks/`
+  - Concrete benchmark implementations split by task family.
+  - `gates.py`: G0/G1/G2/G3 rough contract gates.
+  - `bulk.py`: H-series host bulk generation and ordering sweep.
+  - `lifecycle.py`: I-series lifecycle, seed generation, and first-vs-steady timing.
+  - `granularity.py`: A-series call granularity sweeps.
+  - `device.py`: K-series device output, M3 device fused consume, and E1 compile support matrix.
+  - `fused.py`: F-series fused threshold/add/dropout comparisons.
+  - `memory.py`: M0/M1 memory and consume baselines.
+  - `qrng.py`: Q-series Sobol tasks.
+  - `robustness.py`: E0 host status/error behavior.
+  - `common.py`: shared task helpers for validation, common records, legacy-device baselines, and cuRANDDx unsupported rows.
 
 - `contract_benchmark/summary.py`
   - Machine-readable `summary.json` generation from `results.jsonl` records.
