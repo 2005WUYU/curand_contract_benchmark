@@ -27,7 +27,7 @@ def summarize_records(records: list[dict[str, Any]], *, capability_matrix: dict[
         and record.get("speedup_gpu_vs_baseline") is not None
     ]
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "record_count": len(records),
         "commit": _commit_from_environment(environment),
         "validation_scope": "rough_gate",
@@ -39,6 +39,7 @@ def summarize_records(records: list[dict[str, Any]], *, capability_matrix: dict[
         "unsupported_counts_by_task": dict(Counter(record.get("task_id") for record in unsupported_rows)),
         "unsupported_counts_by_backend": dict(Counter(record.get("backend") for record in unsupported_rows)),
         "cross_record_gate_failures": _cross_record_gate_failure_counts(records),
+        "gate_backend_alias_counts": _gate_backend_alias_counts(records),
         "formal_speedups": _speedup_summary(formal_speedups),
         "formal_speedups_by_task": _speedups_by_task(formal_speedups),
         "failures": [_failure_summary(record) for record in failures],
@@ -73,6 +74,16 @@ def _cross_record_gate_failure_counts(records: list[dict[str, Any]]) -> dict[str
     for record in records:
         for failure in record.get("cross_record_gate_failures") or []:
             counts[str(failure)] += 1
+    return dict(counts)
+
+
+def _gate_backend_alias_counts(records: list[dict[str, Any]]) -> dict[str, int]:
+    counts = Counter()
+    for record in records:
+        backend = record.get("backend")
+        gate_backend = record.get("gate_backend")
+        if backend and gate_backend and backend != gate_backend:
+            counts[f"{backend}->{gate_backend}"] += 1
     return dict(counts)
 
 

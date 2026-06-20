@@ -32,6 +32,7 @@ def write_csv(path: Path, records: list[dict[str, Any]]) -> None:
         "task_id",
         "claim_id",
         "backend",
+        "gate_backend",
         "api_surface",
         "generator",
         "distribution",

@@ -55,6 +55,7 @@ This repository keeps benchmark logic split by responsibility instead of by outp
 - `formal_result == true` means the row passed local validation and cross-record gates and did not carry disqualifying timing audit flags.
 - `speedup_gpu_vs_baseline` is only meaningful when `formal_result == true` and `speedup_baseline_formal == true`.
 - `unsupported` rows are explicit capability records, not performance failures.
+- `backend` is the displayed implementation path, while `gate_backend` is the canonical semantic scope used for cross-record gates. For example, `flagrand_public_output`, `flagrand_public_first`, and `flagrand_public_steady` are gated by `flagrand_public` G1/G2 results.
 
 ## Debugging Path
 

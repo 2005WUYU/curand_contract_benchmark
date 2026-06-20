@@ -5,6 +5,21 @@ from typing import Any
 from contract_benchmark.timing import audit_flags, formal_result_from_flags
 from contract_benchmark.validation import unsupported, validation_error, validation_pass
 
+PUBLIC_OUTPUT_BACKEND_GATE_ALIASES = {
+    "flagrand_public_first": "flagrand_public",
+    "flagrand_public_output": "flagrand_public",
+    "flagrand_public_steady": "flagrand_public",
+}
+
+CURAND_HOST_OUTPUT_BACKEND_GATE_ALIASES = {
+    "curand_host_bulk_plus_consume": "curand_host",
+    "curand_host_first": "curand_host",
+    "curand_host_ordering": "curand_host",
+    "curand_host_steady": "curand_host",
+    "curand_host_uniform_plus_dropout": "curand_host",
+    "curand_host_uniform_plus_threshold": "curand_host",
+}
+
 
 def timed_record(
     ctx: Any,
@@ -80,6 +95,7 @@ def base_record(
         "comparison_level": spec.comparison_level,
         "observability_class": spec.observability_class,
         "backend": backend,
+        "gate_backend": canonical_gate_backend(backend),
         "api_surface": api_surface,
         "generator": generator,
         "distribution": distribution,
@@ -174,8 +190,8 @@ def apply_cross_record_gates(records: list[dict[str, Any]]) -> None:
     for record in records:
         if record.get("validation", {}).get("status") != "fail":
             continue
-        key2 = (str(record.get("backend")), str(record.get("generator")))
-        key3 = (str(record.get("backend")), str(record.get("generator")), str(record.get("distribution")))
+        key2 = _gate_key2(record)
+        key3 = _gate_key3(record)
         if record.get("task_id") == "G2_REPRODUCIBILITY":
             failed_sequence.add(key2)
         elif record.get("task_id") == "G1_DISTRIBUTION_ROUGH_CHECK":
@@ -187,8 +203,9 @@ def apply_cross_record_gates(records: list[dict[str, Any]]) -> None:
     for record in records:
         if record.get("task_id") in gate_task_ids or not record.get("comparison_key"):
             continue
-        key2 = (str(record.get("backend")), str(record.get("generator")))
-        key3 = (str(record.get("backend")), str(record.get("generator")), str(record.get("distribution")))
+        record["gate_backend"] = canonical_gate_backend(str(record.get("backend")))
+        key2 = _gate_key2(record)
+        key3 = _gate_key3(record)
         failures: list[str] = []
         if key3 in failed_basic:
             failures.append("G0_BASIC_CONTRACT")
@@ -202,6 +219,23 @@ def apply_cross_record_gates(records: list[dict[str, Any]]) -> None:
         if failures:
             record["formal_result"] = False
             record["cross_record_gate_failures"] = sorted(set(failures))
+
+
+def canonical_gate_backend(backend: str) -> str:
+    if backend in PUBLIC_OUTPUT_BACKEND_GATE_ALIASES:
+        return PUBLIC_OUTPUT_BACKEND_GATE_ALIASES[backend]
+    if backend in CURAND_HOST_OUTPUT_BACKEND_GATE_ALIASES:
+        return CURAND_HOST_OUTPUT_BACKEND_GATE_ALIASES[backend]
+    return backend
+
+
+def _gate_key2(record: dict[str, Any]) -> tuple[str, str]:
+    return (str(record.get("gate_backend") or canonical_gate_backend(str(record.get("backend")))), str(record.get("generator")))
+
+
+def _gate_key3(record: dict[str, Any]) -> tuple[str, str, str]:
+    gate_backend, generator = _gate_key2(record)
+    return (gate_backend, generator, str(record.get("distribution")))
 
 
 def add_audit_flag(record: dict[str, Any], flag: str) -> None:

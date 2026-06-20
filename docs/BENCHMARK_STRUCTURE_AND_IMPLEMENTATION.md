@@ -54,6 +54,8 @@ curand_contract_benchmark/
 
 `validation.py` 只做 performance gate 粗检，不声称完整随机质量证明。
 
+`records.py` 负责 formal 口径。它区分展示用 `backend` 和门禁用 `gate_backend`，因此 `flagrand_public_output` 这类 public API 派生记录会被 `flagrand_public` 的 G1/G2 语义门禁约束。
+
 `kernels.py` 提供消费 kernel 和 fused Philox/Triton kernel，用于 F0/F1/F2/M0/M1 控制任务。
 
 `native/` 提供 legacy cuRAND Device API fused extension。Windows 本机未必能构建；H20/Linux 上可构建后作为设备端 fused baseline。
