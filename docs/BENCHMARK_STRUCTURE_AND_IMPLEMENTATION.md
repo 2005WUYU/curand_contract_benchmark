@@ -22,7 +22,14 @@ curand_contract_benchmark/
     spec.py
     runner.py
     adapters.py
+    generator_registry.py
+    curand_adapter.py
+    flagrand_adapter.py
+    capabilities.py
     curand_ctypes.py
+    curand_constants.py
+    curand_library.py
+    curand_generator.py
     timing.py
     validation.py
     kernels.py
@@ -37,9 +44,11 @@ curand_contract_benchmark/
 
 `spec.py` 是规格注册表。它定义 C0/C1/G0/G1/G2/G3/H0-H6/I1-I3/A0-A2/K0/K1/F0-F2/M0-M3/Q0/Q1/E0/E1，每个任务都带 claim、comparison level、observability class、timing boundary、validation gate、允许结论和禁止结论。
 
-`runner.py` 是执行层。它不重新解释结果，只按 spec 执行并记录。
+`runner.py` 是执行调度层。它不重新解释结果，只按 spec 分发到 `contract_benchmark/tasks/` 下的 task-family runner 并记录。
 
-`curand_ctypes.py` 直接加载 cuRAND Host API，覆盖 raw32、Sobol64 raw64、uniform、normal、lognormal、Poisson、ordering、offset、dimensions、GenerateSeeds。
+`adapters.py` 是兼容入口；实际逻辑拆在 `generator_registry.py`、`curand_adapter.py`、`flagrand_adapter.py`、`capabilities.py`。这样能力矩阵、生成器元数据、cuRAND 分发和 FlagRand 动态导入可以分别 debug。
+
+`curand_ctypes.py` 是兼容入口；实际 cuRAND Host API 绑定拆在 `curand_constants.py`、`curand_library.py`、`curand_generator.py`。它覆盖 raw32、Sobol64 raw64、uniform、normal、lognormal、Poisson、ordering、offset、dimensions、GenerateSeeds。
 
 `timing.py` 同时保存 CUDA event、CPU enqueue、wall-sync 三种数据。Host API 异步调用必须用同 stream event 或明确同步后的 wall time。
 

@@ -29,6 +29,15 @@ This repository keeps benchmark logic split by responsibility instead of by outp
   - `robustness.py`: E0 host status/error behavior.
   - `common.py`: shared task helpers for validation, common records, legacy-device baselines, and cuRANDDx unsupported rows.
 
+- `contract_benchmark/adapters.py`
+  - Compatibility facade for benchmark-facing backend helpers.
+  - New code should usually read the focused modules first:
+    `generator_registry.py`, `curand_adapter.py`, `flagrand_adapter.py`, and `capabilities.py`.
+
+- `contract_benchmark/curand_ctypes.py`
+  - Compatibility facade for the cuRAND Host API binding.
+  - ABI details are split into `curand_constants.py`, `curand_library.py`, and `curand_generator.py`.
+
 - `contract_benchmark/summary.py`
   - Machine-readable `summary.json` generation from `results.jsonl` records.
   - Use this for downstream analysis instead of reimplementing ad hoc JSONL scans.
