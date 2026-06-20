@@ -21,6 +21,7 @@ for path in (REPO_ROOT, REPO_ROOT / "src"):
 from contract_benchmark.reporting import write_csv, write_json, write_jsonl, write_report, write_task_registry  # noqa: E402
 from contract_benchmark.runner import finalize_records  # noqa: E402
 from contract_benchmark.spec import specs_for_groups  # noqa: E402
+from contract_benchmark.summary import write_summary  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
@@ -166,6 +167,7 @@ def main() -> int:
     write_task_registry(root_dir / "task_registry.json", selected_specs)
     write_jsonl(root_dir / "results.jsonl", records)
     write_csv(root_dir / "results.csv", records)
+    write_summary(root_dir / "summary.json", records=records, capability_matrix=capability_matrix, environment=environment)
     write_report(
         root_dir / "REPORT.md",
         records=records,

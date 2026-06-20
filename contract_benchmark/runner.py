@@ -1,13 +1,7 @@
 from __future__ import annotations
 
+import copy
 import json
-import os
-import platform
-import subprocess
-import sys
-import time
-from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Callable
 
 import torch
@@ -22,17 +16,22 @@ from contract_benchmark.adapters import (
     make_curand_generator,
     make_flagrand_generator,
 )
-from contract_benchmark.curand_ctypes import CurandError, library_load_report
-from contract_benchmark.spec import TaskSpec
-from contract_benchmark.timing import (
-    audit_flags,
-    collect_cuda_event_and_wall_us,
-    collect_wall_only_us,
-    formal_result_from_flags,
+from contract_benchmark.curand_ctypes import CurandError
+from contract_benchmark.profiles import BenchmarkContext, BenchmarkProfile, PROFILES, collect_environment
+from contract_benchmark.records import (
+    base_record as _base_record,
+    error_record as _error_record,
+    finalize_records,
+    gate_record as _gate_record,
+    metadata_record as _metadata_record,
+    metadata_rows as _metadata_rows,
+    timed_record as _timed_record,
+    unsupported_record as _unsupported_record,
 )
+from contract_benchmark.spec import TaskSpec
+from contract_benchmark.timing import collect_cuda_event_and_wall_us, collect_wall_only_us
 from contract_benchmark.validation import (
     tensors_equal,
-    unsupported,
     validate_finite_output,
     validate_lognormal,
     validate_mask,
@@ -43,117 +42,6 @@ from contract_benchmark.validation import (
     validation_error,
     validation_pass,
 )
-
-
-@dataclass(frozen=True)
-class BenchmarkProfile:
-    name: str
-    sizes: list[int]
-    gate_n: int
-    warmup: int
-    repeats: int
-    raw_generators: list[str]
-    dist_generators: list[str]
-    qrng_generators: list[str]
-    poisson_lambdas: list[float]
-    fused_ps: list[float]
-    many_small_calls: int
-    many_small_chunk_n: int
-
-
-PROFILES = {
-    "local_smoke": BenchmarkProfile(
-        "local_smoke",
-        sizes=[1024, 16384, 65536],
-        gate_n=4096,
-        warmup=1,
-        repeats=3,
-        raw_generators=["philox4x32_10", "xorwow", "mrg32k3a"],
-        dist_generators=["philox4x32_10"],
-        qrng_generators=["sobol32", "sobol64"],
-        poisson_lambdas=[1.0, 10.0],
-        fused_ps=[0.5],
-        many_small_calls=8,
-        many_small_chunk_n=1024,
-    ),
-    "local": BenchmarkProfile(
-        "local",
-        sizes=[1024, 4096, 65536, 1048576],
-        gate_n=16384,
-        warmup=3,
-        repeats=10,
-        raw_generators=["philox4x32_10", "xorwow", "mrg32k3a", "sobol32", "sobol64"],
-        dist_generators=["philox4x32_10", "xorwow", "mrg32k3a"],
-        qrng_generators=["sobol32", "scrambled_sobol32", "sobol64", "scrambled_sobol64"],
-        poisson_lambdas=[0.1, 1.0, 10.0, 64.0],
-        fused_ps=[0.1, 0.5, 0.9],
-        many_small_calls=64,
-        many_small_chunk_n=1024,
-    ),
-    "h20": BenchmarkProfile(
-        "h20",
-        sizes=[4096, 16384, 65536, 262144, 1048576, 4194304, 8388608],
-        gate_n=65536,
-        warmup=5,
-        repeats=20,
-        raw_generators=["philox4x32_10", "xorwow", "mrg32k3a", "mtgp32", "mt19937", "sobol32", "sobol64"],
-        dist_generators=["philox4x32_10", "xorwow", "mrg32k3a"],
-        qrng_generators=["sobol32", "scrambled_sobol32", "sobol64", "scrambled_sobol64"],
-        poisson_lambdas=[0.1, 1.0, 4.0, 10.0, 32.0, 64.0, 256.0, 1024.0, 10000.0],
-        fused_ps=[0.01, 0.1, 0.5, 0.9, 0.99],
-        many_small_calls=128,
-        many_small_chunk_n=1024,
-    ),
-}
-
-
-@dataclass
-class BenchmarkContext:
-    repo_root: Path
-    benchmark_root: Path
-    profile: BenchmarkProfile
-    specs: dict[str, TaskSpec]
-    seed: int = 12345
-    offset: int = 0
-    device: torch.device = torch.device("cuda")
-
-
-def collect_environment(profile_name: str) -> dict[str, Any]:
-    cuda_available = torch.cuda.is_available()
-    curand_report: dict[str, Any]
-    try:
-        curand_report = library_load_report()
-    except Exception as exc:
-        curand_report = {"available": False, "error": str(exc)}
-    env = {
-        "profile": profile_name,
-        "python": sys.version,
-        "platform": platform.platform(),
-        "torch_version": torch.__version__,
-        "cuda_available": cuda_available,
-        "cuda_runtime_from_torch": torch.version.cuda,
-        "curand": curand_report,
-        "time_unix": time.time(),
-    }
-    if cuda_available:
-        env.update(
-            {
-                "gpu_name": torch.cuda.get_device_name(0),
-                "gpu_capability": list(torch.cuda.get_device_capability(0)),
-                "gpu_count": torch.cuda.device_count(),
-            }
-        )
-    try:
-        import triton
-
-        env["triton_version"] = getattr(triton, "__version__", "unknown")
-    except Exception as exc:
-        env["triton_version_error"] = str(exc)
-    env["git"] = _git_info()
-    launcher_git_commit = os.environ.get("CURAND_CONTRACT_GIT_SHA")
-    if launcher_git_commit:
-        env["launcher_git_commit"] = launcher_git_commit
-    return env
 
 
 def run_specs(ctx: BenchmarkContext, selected_specs: list[TaskSpec]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -676,6 +564,7 @@ def _run_threshold(ctx: BenchmarkContext, spec: TaskSpec) -> list[dict[str, Any]
     for p in ctx.profile.fused_ps:
         for n0 in ctx.profile.sizes:
             n = _adjust_n(n0, "philox4x32_10", "uniform_f32")
+            comparison_key = f"{spec.task_id}:{p}:{n}"
             u = torch.empty(n, device=ctx.device, dtype=torch.float32)
             mask = torch.empty(n, device=ctx.device, dtype=torch.uint8)
             with make_curand_generator("philox4x32_10", seed=ctx.seed, offset=ctx.offset, ordering="legacy") as gen:
@@ -683,16 +572,20 @@ def _run_threshold(ctx: BenchmarkContext, spec: TaskSpec) -> list[dict[str, Any]
                 validation = _validate_after(run_base, lambda: validate_mask(mask, n=n, p=p))
                 timing = collect_cuda_event_and_wall_us(run_base, warmup_iters=ctx.profile.warmup, repeats=ctx.profile.repeats)
             records.append(
-                _timed_record(ctx, spec, "curand_host_uniform_plus_threshold", "curand_host_api+triton_consume", "philox4x32_10", "uniform_threshold", n, timing, validation, parameters={"p": p}, comparison_key=f"{spec.task_id}:{p}:{n}", is_baseline=True, baseline_id="curand_host_bulk_plus_consume", temporary_bytes=n * 4)
+                _timed_record(ctx, spec, "curand_host_uniform_plus_threshold", "curand_host_api+triton_consume", "philox4x32_10", "uniform_threshold", n, timing, validation, parameters={"p": p}, comparison_key=comparison_key, is_baseline=True, baseline_id="curand_host_bulk_plus_consume", temporary_bytes=n * 4)
             )
             mask2 = torch.empty(n, device=ctx.device, dtype=torch.uint8)
             run_fused = lambda: kernels.fused_philox_threshold(mask2, seed=ctx.seed, p=p)
             validation2 = _validate_after(run_fused, lambda: validate_mask(mask2, n=n, p=p))
             timing2 = collect_cuda_event_and_wall_us(run_fused, warmup_iters=ctx.profile.warmup, repeats=ctx.profile.repeats)
-            records.append(
-                _timed_record(ctx, spec, "flagrand_fused_philox", "flagrand_benchmark_kernel", "philox4x32_10", "uniform_threshold", n, timing2, validation2, parameters={"p": p}, comparison_key=f"{spec.task_id}:{p}:{n}", is_baseline=False, baseline_id="curand_host_bulk_plus_consume", temporary_bytes=0)
+            flagrand_record = _timed_record(
+                ctx, spec, "flagrand_fused_philox", "flagrand_benchmark_kernel", "philox4x32_10", "uniform_threshold", n, timing2, validation2, parameters={"p": p}, comparison_key=comparison_key, is_baseline=False, baseline_id="curand_host_bulk_plus_consume", temporary_bytes=0
             )
-            records.extend(_device_fused_unsupported_rows(ctx, spec, n=n, distribution="uniform_threshold", parameters={"p": p}, comparison_key=f"{spec.task_id}:{p}:{n}"))
+            records.append(flagrand_record)
+            device_rows = _device_fused_unsupported_rows(ctx, spec, n=n, distribution="uniform_threshold", parameters={"p": p}, comparison_key=comparison_key)
+            records.extend(device_rows)
+            if _has_legacy_device_baseline(device_rows):
+                records.append(_alternate_baseline_record(flagrand_record, f"{comparison_key}:legacy_device", "curand_legacy_device_fused"))
     return records
 
 
@@ -721,7 +614,10 @@ def _run_add_uniform(ctx: BenchmarkContext, spec: TaskSpec, *, task_override: st
             rec["task_id"] = task_override
         records.append(rec)
         if task_override is None:
-            records.extend(_device_fused_unsupported_rows(ctx, spec, n=n, distribution="uniform_add_consume", parameters={"alpha": alpha}, comparison_key=f"{task_id}:{n}"))
+            device_rows = _device_fused_unsupported_rows(ctx, spec, n=n, distribution="uniform_add_consume", parameters={"alpha": alpha}, comparison_key=f"{task_id}:{n}")
+            records.extend(device_rows)
+            if _has_legacy_device_baseline(device_rows):
+                records.append(_alternate_baseline_record(rec, f"{task_id}:{n}:legacy_device", "curand_legacy_device_fused"))
     return records
 
 
@@ -730,6 +626,7 @@ def _run_dropout(ctx: BenchmarkContext, spec: TaskSpec) -> list[dict[str, Any]]:
     for p in ctx.profile.fused_ps:
         for n0 in ctx.profile.sizes:
             n = _adjust_n(n0, "philox4x32_10", "uniform_f32")
+            comparison_key = f"{spec.task_id}:{p}:{n}"
             x = torch.ones(n, device=ctx.device, dtype=torch.float32)
             u = torch.empty(n, device=ctx.device, dtype=torch.float32)
             out = torch.empty(n, device=ctx.device, dtype=torch.float32)
@@ -739,17 +636,21 @@ def _run_dropout(ctx: BenchmarkContext, spec: TaskSpec) -> list[dict[str, Any]]:
                 validation = _validate_after(run_base, lambda: _merge_validations(validate_finite_output(out, n=n), validate_mask(mask, n=n, p=p)))
                 timing = collect_cuda_event_and_wall_us(run_base, warmup_iters=ctx.profile.warmup, repeats=ctx.profile.repeats)
             records.append(
-                _timed_record(ctx, spec, "curand_host_uniform_plus_dropout", "curand_host_api+triton_consume", "philox4x32_10", "dropout", n, timing, validation, parameters={"p": p, "rule": "u<=p", "scaling": "inverted"}, comparison_key=f"{spec.task_id}:{p}:{n}", is_baseline=True, baseline_id="curand_host_bulk_plus_consume", temporary_bytes=n * 4)
+                _timed_record(ctx, spec, "curand_host_uniform_plus_dropout", "curand_host_api+triton_consume", "philox4x32_10", "dropout", n, timing, validation, parameters={"p": p, "rule": "u<=p", "scaling": "inverted"}, comparison_key=comparison_key, is_baseline=True, baseline_id="curand_host_bulk_plus_consume", temporary_bytes=n * 4)
             )
             out2 = torch.empty_like(out)
             mask2 = torch.empty_like(mask)
             run_fused = lambda: kernels.fused_philox_dropout(x, out2, mask2, seed=ctx.seed, p=p)
             validation2 = _validate_after(run_fused, lambda: _merge_validations(validate_finite_output(out2, n=n), validate_mask(mask2, n=n, p=p)))
             timing2 = collect_cuda_event_and_wall_us(run_fused, warmup_iters=ctx.profile.warmup, repeats=ctx.profile.repeats)
-            records.append(
-                _timed_record(ctx, spec, "flagrand_fused_philox", "flagrand_benchmark_kernel", "philox4x32_10", "dropout", n, timing2, validation2, parameters={"p": p, "rule": "u<=p", "scaling": "inverted"}, comparison_key=f"{spec.task_id}:{p}:{n}", is_baseline=False, baseline_id="curand_host_bulk_plus_consume", temporary_bytes=0)
+            flagrand_record = _timed_record(
+                ctx, spec, "flagrand_fused_philox", "flagrand_benchmark_kernel", "philox4x32_10", "dropout", n, timing2, validation2, parameters={"p": p, "rule": "u<=p", "scaling": "inverted"}, comparison_key=comparison_key, is_baseline=False, baseline_id="curand_host_bulk_plus_consume", temporary_bytes=0
             )
-            records.extend(_device_fused_unsupported_rows(ctx, spec, n=n, distribution="dropout", parameters={"p": p}, comparison_key=f"{spec.task_id}:{p}:{n}"))
+            records.append(flagrand_record)
+            device_rows = _device_fused_unsupported_rows(ctx, spec, n=n, distribution="dropout", parameters={"p": p}, comparison_key=comparison_key)
+            records.extend(device_rows)
+            if _has_legacy_device_baseline(device_rows):
+                records.append(_alternate_baseline_record(flagrand_record, f"{comparison_key}:legacy_device", "curand_legacy_device_fused"))
     return records
 
 
@@ -868,6 +769,7 @@ def _run_device_raw_output(ctx: BenchmarkContext, spec: TaskSpec) -> list[dict[s
         )
     else:
         for n in ctx.profile.sizes:
+            comparison_key = f"{spec.task_id}:legacy_device:philox4x32_10:raw32:{n}"
             out = torch.empty(n, device=ctx.device, dtype=torch.int32)
             run_once = lambda: ext.philox_raw_u32(out, ctx.seed, ctx.offset)
             validation = _validate_after(run_once, lambda: validate_raw_tensor(out, dtype=torch.int32, n=n))
@@ -884,8 +786,32 @@ def _run_device_raw_output(ctx: BenchmarkContext, spec: TaskSpec) -> list[dict[s
                     timing,
                     validation,
                     parameters=parameters,
-                    comparison_key=f"{spec.task_id}:legacy_device:philox4x32_10:{n}",
+                    comparison_key=comparison_key,
                     is_baseline=True,
+                    baseline_id="curand_legacy_device_output",
+                    temporary_bytes=0,
+                    output_bytes=n * 4,
+                )
+            )
+            out_flagrand = torch.empty(n, device=ctx.device, dtype=torch.int32)
+            gen = make_flagrand_generator("philox4x32_10", seed=ctx.seed, offset=ctx.offset)
+            run_flagrand = lambda: flagrand_generate_raw(out_flagrand, gen)
+            validation_flagrand = _validate_after(run_flagrand, lambda: validate_raw_tensor(out_flagrand, dtype=torch.int32, n=n))
+            timing_flagrand = collect_cuda_event_and_wall_us(run_flagrand, warmup_iters=ctx.profile.warmup, repeats=ctx.profile.repeats)
+            records.append(
+                _timed_record(
+                    ctx,
+                    spec,
+                    "flagrand_public_output",
+                    "flagrand_public_api",
+                    "philox4x32_10",
+                    "raw32",
+                    n,
+                    timing_flagrand,
+                    validation_flagrand,
+                    parameters={"comparison_baseline": "curand_legacy_device_output"},
+                    comparison_key=comparison_key,
+                    is_baseline=False,
                     baseline_id="curand_legacy_device_output",
                     temporary_bytes=0,
                     output_bytes=n * 4,
@@ -916,6 +842,7 @@ def _run_device_uniform_output(ctx: BenchmarkContext, spec: TaskSpec) -> list[di
         )
     else:
         for n in ctx.profile.sizes:
+            comparison_key = f"{spec.task_id}:legacy_device:philox4x32_10:uniform_f32:{n}"
             out = torch.empty(n, device=ctx.device, dtype=torch.float32)
             run_once = lambda: ext.philox_uniform(out, ctx.seed, ctx.offset)
             validation = _validate_after(run_once, lambda: validate_uniform(out, n=n, low_open=True))
@@ -932,8 +859,32 @@ def _run_device_uniform_output(ctx: BenchmarkContext, spec: TaskSpec) -> list[di
                     timing,
                     validation,
                     parameters=parameters,
-                    comparison_key=f"{spec.task_id}:legacy_device:philox4x32_10:{n}",
+                    comparison_key=comparison_key,
                     is_baseline=True,
+                    baseline_id="curand_legacy_device_output",
+                    temporary_bytes=0,
+                    output_bytes=n * 4,
+                )
+            )
+            out_flagrand = torch.empty(n, device=ctx.device, dtype=torch.float32)
+            gen = make_flagrand_generator("philox4x32_10", seed=ctx.seed, offset=ctx.offset)
+            run_flagrand = lambda: flagrand_generate_by_distribution(gen, out_flagrand, "uniform_f32")
+            validation_flagrand = _validate_after(run_flagrand, lambda: validate_uniform(out_flagrand, n=n))
+            timing_flagrand = collect_cuda_event_and_wall_us(run_flagrand, warmup_iters=ctx.profile.warmup, repeats=ctx.profile.repeats)
+            records.append(
+                _timed_record(
+                    ctx,
+                    spec,
+                    "flagrand_public_output",
+                    "flagrand_public_api",
+                    "philox4x32_10",
+                    "uniform_f32",
+                    n,
+                    timing_flagrand,
+                    validation_flagrand,
+                    parameters={"comparison_baseline": "curand_legacy_device_output"},
+                    comparison_key=comparison_key,
+                    is_baseline=False,
                     baseline_id="curand_legacy_device_output",
                     temporary_bytes=0,
                     output_bytes=n * 4,
@@ -1220,6 +1171,24 @@ def _device_fused_unsupported_rows(
     return rows
 
 
+def _has_legacy_device_baseline(rows: list[dict[str, Any]]) -> bool:
+    return any(row.get("backend") == "curand_legacy_device_fused" and row.get("is_baseline") for row in rows)
+
+
+def _alternate_baseline_record(record: dict[str, Any], comparison_key: str, baseline_id: str) -> dict[str, Any]:
+    alternate = copy.deepcopy(record)
+    alternate["comparison_key"] = comparison_key
+    alternate["baseline_id"] = baseline_id
+    alternate["is_baseline"] = False
+    parameters = dict(alternate.get("parameters") or {})
+    parameters["comparison_baseline"] = baseline_id
+    alternate["parameters"] = parameters
+    alternate["speedup_gpu_vs_baseline"] = None
+    alternate["speedup_wall_vs_baseline"] = None
+    alternate["speedup_baseline_formal"] = False
+    return alternate
+
+
 def _run_legacy_device_fused_extension(
     ctx: BenchmarkContext,
     spec: TaskSpec,
@@ -1331,286 +1300,6 @@ def _adjust_n(n: int, generator: str, distribution: str) -> int:
     return value
 
 
-def _timed_record(
-    ctx: BenchmarkContext,
-    spec: TaskSpec,
-    backend: str,
-    api_surface: str,
-    generator: str,
-    distribution: str,
-    n: int,
-    timing,
-    validation: dict[str, Any],
-    *,
-    parameters: dict[str, Any] | None = None,
-    comparison_key: str,
-    is_baseline: bool,
-    baseline_id: str | None = None,
-    ordering: str | None = "legacy",
-    temporary_bytes: int | str | None = "not_exposed",
-    output_bytes: int | None = None,
-    item_count: int | None = None,
-) -> dict[str, Any]:
-    flags = audit_flags(timing)
-    record = _base_record(
-        ctx,
-        spec,
-        backend,
-        api_surface,
-        generator,
-        distribution,
-        n,
-        validation=validation,
-        parameters=parameters,
-        ordering=ordering,
-    )
-    record.update(timing.to_record())
-    record.update(
-        {
-            "comparison_key": comparison_key,
-            "is_baseline": is_baseline,
-            "baseline_id": baseline_id,
-            "temporary_bytes": temporary_bytes,
-            "audit_flags": flags,
-            "formal_result": validation.get("status") == "pass" and formal_result_from_flags(flags),
-        }
-    )
-    median = record.get("median_gpu_us")
-    items = item_count if item_count is not None else n
-    bytes_out = output_bytes if output_bytes is not None else _estimate_output_bytes(distribution, n)
-    if median and median > 0 and items:
-        record["items_per_second"] = items / (median * 1e-6)
-    if median and median > 0 and bytes_out:
-        record["bytes_per_second"] = bytes_out / (median * 1e-6)
-    return record
-
-
-def _base_record(
-    ctx: BenchmarkContext,
-    spec: TaskSpec,
-    backend: str,
-    api_surface: str,
-    generator: str,
-    distribution: str,
-    n: int,
-    *,
-    validation: dict[str, Any],
-    parameters: dict[str, Any] | None = None,
-    ordering: str | None = None,
-) -> dict[str, Any]:
-    return {
-        "task_id": spec.task_id,
-        "claim_id": spec.claim_id,
-        "family": spec.family,
-        "comparison_level": spec.comparison_level,
-        "observability_class": spec.observability_class,
-        "backend": backend,
-        "api_surface": api_surface,
-        "generator": generator,
-        "distribution": distribution,
-        "dtype": _dtype_name(distribution),
-        "ordering": ordering,
-        "seed": ctx.seed,
-        "offset": ctx.offset,
-        "N": int(n),
-        "parameters": parameters or {},
-        "timing_boundary": spec.timing_boundary,
-        "validation": validation,
-        "what_it_can_say": spec.can_say,
-        "what_it_cannot_say": spec.cannot_say,
-        "known_limitations": [spec.cannot_say],
-    }
-
-
-def _metadata_record(ctx: BenchmarkContext, spec: TaskSpec, backend: str, payload: dict[str, Any]) -> dict[str, Any]:
-    record = _base_record(ctx, spec, backend, "metadata", "not_applicable", "metadata", 0, validation=validation_pass({"metadata_recorded": True}))
-    record["payload"] = payload
-    record["formal_result"] = True
-    return record
-
-
-def _metadata_rows(ctx: BenchmarkContext, spec: TaskSpec, payload: dict[str, Any]) -> list[dict[str, Any]]:
-    rows = [_metadata_record(ctx, spec, "capability_matrix", payload)]
-    for generator, info in payload.get("generators", {}).items():
-        row = _metadata_record(ctx, spec, f"capability_{generator}", info)
-        row["generator"] = generator
-        rows.append(row)
-    return rows
-
-
-def _gate_record(
-    ctx: BenchmarkContext,
-    spec: TaskSpec,
-    backend: str,
-    generator: str,
-    distribution: str,
-    n: int,
-    validation: dict[str, Any],
-) -> dict[str, Any]:
-    record = _base_record(ctx, spec, backend, "gate", generator, distribution, n, validation=validation)
-    record["formal_result"] = validation.get("status") == "pass"
-    return record
-
-
-def _unsupported_record(
-    ctx: BenchmarkContext,
-    spec: TaskSpec,
-    backend: str,
-    reason: str,
-    *,
-    generator: str = "not_applicable",
-    distribution: str = "not_applicable",
-    n: int = 0,
-    parameters: dict[str, Any] | None = None,
-    comparison_key: str | None = None,
-    baseline_id: str | None = None,
-) -> dict[str, Any]:
-    record = _base_record(ctx, spec, backend, "unsupported", generator, distribution, n, validation=unsupported(reason), parameters=parameters)
-    record.update(
-        {
-            "comparison_key": comparison_key,
-            "is_baseline": False,
-            "baseline_id": baseline_id,
-            "formal_result": False,
-            "audit_flags": ["unsupported_backend"],
-        }
-    )
-    return record
-
-
-def _error_record(
-    ctx: BenchmarkContext,
-    spec: TaskSpec,
-    backend: str,
-    exc: BaseException,
-    *,
-    generator: str = "not_applicable",
-    distribution: str = "not_applicable",
-    n: int = 0,
-    parameters: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    record = _base_record(ctx, spec, backend, "error", generator, distribution, n, validation=validation_error(exc), parameters=parameters)
-    record.update({"formal_result": False, "audit_flags": ["runtime_error"]})
-    return record
-
-
-def finalize_records(records: list[dict[str, Any]]) -> None:
-    apply_cross_record_gates(records)
-    _compute_speedups(records)
-
-
-def apply_cross_record_gates(records: list[dict[str, Any]]) -> None:
-    failed_sequence: set[tuple[str, str]] = set()
-    failed_distribution: set[tuple[str, str, str]] = set()
-    failed_basic: set[tuple[str, str, str]] = set()
-    for record in records:
-        if record.get("validation", {}).get("status") != "fail":
-            continue
-        key2 = (str(record.get("backend")), str(record.get("generator")))
-        key3 = (str(record.get("backend")), str(record.get("generator")), str(record.get("distribution")))
-        if record.get("task_id") == "G2_REPRODUCIBILITY":
-            failed_sequence.add(key2)
-        elif record.get("task_id") == "G1_DISTRIBUTION_ROUGH_CHECK":
-            failed_distribution.add(key3)
-        elif record.get("task_id") == "G0_BASIC_CONTRACT":
-            failed_basic.add(key3)
-
-    gate_task_ids = {"G0_BASIC_CONTRACT", "G1_DISTRIBUTION_ROUGH_CHECK", "G2_REPRODUCIBILITY"}
-    for record in records:
-        if record.get("task_id") in gate_task_ids or not record.get("comparison_key"):
-            continue
-        key2 = (str(record.get("backend")), str(record.get("generator")))
-        key3 = (str(record.get("backend")), str(record.get("generator")), str(record.get("distribution")))
-        failures: list[str] = []
-        if key3 in failed_basic:
-            failures.append("G0_BASIC_CONTRACT")
-            _add_audit_flag(record, "basic_contract_gate_failed")
-        if key3 in failed_distribution:
-            failures.append("G1_DISTRIBUTION_ROUGH_CHECK")
-            _add_audit_flag(record, "distribution_gate_failed")
-        if key2 in failed_sequence:
-            failures.append("G2_REPRODUCIBILITY")
-            _add_audit_flag(record, "sequence_semantics_gate_failed")
-        if failures:
-            record["formal_result"] = False
-            record["cross_record_gate_failures"] = sorted(set(failures))
-
-
-def _add_audit_flag(record: dict[str, Any], flag: str) -> None:
-    flags = record.get("audit_flags")
-    if not isinstance(flags, list):
-        flags = []
-        record["audit_flags"] = flags
-    if flag not in flags:
-        flags.append(flag)
-
-
-def _compute_speedups(records: list[dict[str, Any]]) -> None:
-    baselines: dict[str, dict[str, float]] = {}
-    seen_baseline_keys: set[str] = set()
-    for record in records:
-        record["speedup_gpu_vs_baseline"] = None
-        record["speedup_wall_vs_baseline"] = None
-        record["speedup_baseline_formal"] = False
-    for record in records:
-        key = record.get("comparison_key")
-        if not key or not record.get("is_baseline"):
-            continue
-        seen_baseline_keys.add(key)
-        if not record.get("formal_result"):
-            continue
-        gpu = record.get("median_gpu_us")
-        wall = record.get("median_wall_sync_us")
-        if gpu is not None or wall is not None:
-            baselines[key] = {"gpu": gpu, "wall": wall}
-    for record in records:
-        key = record.get("comparison_key")
-        base = baselines.get(key)
-        record["speedup_baseline_formal"] = bool(base)
-        if key and base and not record.get("formal_result"):
-            if not record.get("is_baseline"):
-                _add_audit_flag(record, "record_not_formal")
-            continue
-        if not key or not base:
-            if key in seen_baseline_keys and not record.get("is_baseline"):
-                _add_audit_flag(record, "baseline_not_formal")
-            continue
-        gpu = record.get("median_gpu_us")
-        wall = record.get("median_wall_sync_us")
-        record["speedup_gpu_vs_baseline"] = _ratio(base.get("gpu"), gpu)
-        record["speedup_wall_vs_baseline"] = _ratio(base.get("wall"), wall)
-
-
-def _ratio(a: float | None, b: float | None) -> float | None:
-    if a is None or b is None or b == 0:
-        return None
-    return float(a) / float(b)
-
-
-def _estimate_output_bytes(distribution: str, n: int) -> int | None:
-    if "raw64" in distribution:
-        return n * 8
-    if "dropout" in distribution:
-        return n * 5
-    if "threshold" in distribution:
-        return n
-    if distribution == "metadata":
-        return None
-    return n * 4
-
-
-def _dtype_name(distribution: str) -> str:
-    if "raw64" in distribution:
-        return "uint64/int64_storage"
-    if "raw32" in distribution or "poisson" in distribution:
-        return "uint32/int32_storage"
-    if "threshold" in distribution or "mask" in distribution:
-        return "uint8"
-    if distribution in {"metadata", "lifecycle", "generate_seeds", "error_case"}:
-        return "not_applicable"
-    return "float32"
-
-
 def _e0_curand_invalid_lambda(ctx: BenchmarkContext) -> dict[str, Any]:
     out = torch.empty(16, device=ctx.device, dtype=torch.int32)
     try:
@@ -1662,17 +1351,3 @@ def _e0_flagrand_odd_philox_n(ctx: BenchmarkContext) -> dict[str, Any]:
     except BaseException as exc:
         return {"raised": True, "error_type": type(exc).__name__, "error": str(exc)}
     return {"raised": False}
-
-
-def _git_info() -> dict[str, Any]:
-    launcher_git_commit = os.environ.get("CURAND_CONTRACT_GIT_SHA")
-    try:
-        root = Path(__file__).resolve().parents[1]
-        sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True, stderr=subprocess.DEVNULL).strip()
-        status = subprocess.check_output(["git", "status", "--short"], cwd=root, text=True, stderr=subprocess.DEVNULL)
-        return {"commit": sha, "dirty": bool(status.strip()), "status_short": status.splitlines()[:20], "source": "git"}
-    except Exception as exc:
-        info: dict[str, Any] = {"error": str(exc)}
-        if launcher_git_commit:
-            info.update({"commit": launcher_git_commit, "dirty": None, "status_short": [], "source": "CURAND_CONTRACT_GIT_SHA"})
-        return info

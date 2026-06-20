@@ -39,6 +39,7 @@ def write_csv(path: Path, records: list[dict[str, Any]]) -> None:
         "N",
         "parameters",
         "validation_status",
+        "validation_scope",
         "unsupported_reason",
         "median_gpu_us",
         "median_wall_sync_us",

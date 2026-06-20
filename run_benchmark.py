@@ -30,6 +30,7 @@ from contract_benchmark.runner import (  # noqa: E402
     run_specs,
 )
 from contract_benchmark.spec import build_task_specs, specs_for_groups  # noqa: E402
+from contract_benchmark.summary import write_summary  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
@@ -95,6 +96,7 @@ def main() -> int:
     write_task_registry(results_dir / "task_registry.json", selected_specs)
     write_jsonl(results_dir / "results.jsonl", records)
     write_csv(results_dir / "results.csv", records)
+    write_summary(results_dir / "summary.json", records=records, capability_matrix=cap_matrix, environment=environment)
     write_report(
         results_dir / "REPORT.md",
         records=records,

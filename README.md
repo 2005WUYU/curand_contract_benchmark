@@ -79,10 +79,27 @@ curand_contract_benchmark/results/<timestamp>_<profile>/
   task_registry.json
   results.jsonl
   results.csv
+  summary.json
   REPORT.md
 ```
 
-正式分析优先看 `results.jsonl` 和 `REPORT.md`，因为它们保留了 claim、observability class、timing boundary、validation、raw samples、audit flags 和 unsupported reason。
+正式分析优先看：
+
+- `summary.json`：机器可读汇总，包含 formal speedup 区间、gate failures、unsupported counts。
+- `REPORT.md`：人读报告。
+- `results.jsonl`：逐行审计，保留 claim、observability class、timing boundary、validation、audit flags 和 unsupported reason。
+
+代码结构说明见：
+
+```text
+docs/BENCHMARK_CODE_ARCHITECTURE.md
+```
+
+快速 gate smoke 可单独运行：
+
+```bash
+bash scripts/gate_smoke.sh
+```
 
 ## 设计原则
 

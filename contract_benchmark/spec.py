@@ -391,17 +391,17 @@ def build_task_specs() -> list[TaskSpec]:
             2,
             "device_api",
             "K0_DEVICE_RAW_OUTPUT",
-            "Measure legacy Device API or cuRANDDx output-only raw kernels when build support exists.",
+            "Measure legacy Device API output-only raw kernels and align FlagRand output-only candidates to that baseline when build support exists.",
             "device_output",
             "direct_attributable",
             "stage2_must",
-            ["legacy_device_api", "curanddx"],
+            ["legacy_device_api", "flagrand_public_api", "curanddx"],
             ["flagrand_benchmark_kernels"],
             {"dtype": "uint32", "location": "device"},
             {"allocation_included": False, "output_write_included": True},
             ["extension_build_or_unsupported_reason"],
-            "Device-side output-only baseline performance.",
-            "Unsupported rows must not be silently omitted.",
+            "Device-side output-only baseline and comparable FlagRand output-only candidate performance.",
+            "Unsupported cuRANDDx rows must not be silently omitted; legacy Device ordering is not Host API ordering.",
             common_sources,
         ),
         TaskSpec(
@@ -409,17 +409,17 @@ def build_task_specs() -> list[TaskSpec]:
             2,
             "device_api",
             "K1_DEVICE_UNIFORM_OUTPUT",
-            "Measure legacy Device API or cuRANDDx uniform output kernels when available.",
+            "Measure legacy Device API uniform output kernels and align FlagRand output-only uniform candidates to that baseline when available.",
             "device_output",
             "direct_solution",
             "stage2_must",
-            ["legacy_device_api", "curanddx"],
+            ["legacy_device_api", "flagrand_public_api", "curanddx"],
             ["flagrand_benchmark_kernels"],
             {"dtype": "float32", "distribution": "uniform"},
             {"allocation_included": False, "output_write_included": True},
             ["extension_build_or_unsupported_reason"],
-            "Device-side output-only uniform baseline.",
-            "It is not Host API public-output performance.",
+            "Device-side output-only uniform baseline and comparable FlagRand output-only uniform candidate performance.",
+            "Unsupported cuRANDDx rows must not be silently omitted; legacy Device ordering is not Host API ordering.",
             common_sources,
         ),
         TaskSpec(
@@ -636,4 +636,3 @@ def specs_for_groups(groups: set[str]) -> list[TaskSpec]:
         if spec.task_id in groups or spec.family in groups or f"stage{spec.stage}" in groups:
             selected.append(spec)
     return selected
-
