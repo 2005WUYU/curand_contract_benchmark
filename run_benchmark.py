@@ -2,16 +2,15 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 from pathlib import Path
 
 import torch
 
 
-BENCHMARK_ROOT = Path(__file__).resolve().parent
-REPO_ROOT = BENCHMARK_ROOT.parent
-LOCAL_SRC_ROOT = BENCHMARK_ROOT / "src"
-PARENT_SRC_ROOT = REPO_ROOT / "src"
-for path in (BENCHMARK_ROOT, LOCAL_SRC_ROOT, PARENT_SRC_ROOT):
+REPO_ROOT = Path(__file__).resolve().parent
+LOCAL_SRC_ROOT = REPO_ROOT / "src"
+for path in (REPO_ROOT, LOCAL_SRC_ROOT):
     text = str(path)
     if path.exists() and text not in sys.path:
         sys.path.insert(0, text)
@@ -41,7 +40,7 @@ def parse_args() -> argparse.Namespace:
         default="stage0,stage1,stage2,stage3,stage4",
         help="Comma-separated task ids, families, stage0..stage4, or all.",
     )
-    parser.add_argument("--results-dir", type=Path, default=BENCHMARK_ROOT / "results")
+    parser.add_argument("--results-dir", type=Path, default=REPO_ROOT / "results")
     parser.add_argument("--run-dir", type=Path, default=None, help="Exact output directory. Intended for sharded/parallel launchers.")
     parser.add_argument("--list-tasks", action="store_true")
     parser.add_argument("--h20-reference", type=Path, default=REPO_ROOT / "20260615-185511-h20-full-fast")
@@ -49,6 +48,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
+    run_started_unix = time.time()
     args = parse_args()
     all_specs = build_task_specs()
     if args.list_tasks:
@@ -74,7 +74,7 @@ def main() -> int:
 
     ctx = BenchmarkContext(
         repo_root=REPO_ROOT,
-        benchmark_root=BENCHMARK_ROOT,
+        benchmark_root=REPO_ROOT,
         profile=profile,
         specs=selected_map,
         device=torch.device("cuda"),
@@ -83,6 +83,12 @@ def main() -> int:
     environment = collect_environment(args.profile)
     records, cap_matrix = run_specs(ctx, selected_specs)
     h20_reference = _load_h20_reference(args.h20_reference)
+    run_ended_unix = time.time()
+    environment["run_timing"] = {
+        "started_unix": run_started_unix,
+        "ended_unix": run_ended_unix,
+        "elapsed_seconds": run_ended_unix - run_started_unix,
+    }
 
     write_json(results_dir / "environment.json", environment)
     write_json(results_dir / "capability_matrix.json", cap_matrix)
@@ -105,6 +111,7 @@ def main() -> int:
         f"[contract-benchmark] records={len(records)} pass={pass_count} "
         f"fail={fail_count} unsupported={unsupported_count}"
     )
+    print(f"[contract-benchmark] elapsed_seconds={run_ended_unix - run_started_unix:.3f}")
     print(f"[contract-benchmark] report: {results_dir / 'REPORT.md'}")
     return 0
 

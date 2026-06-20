@@ -13,6 +13,7 @@ export IMAGE="${IMAGE:-flagtree-nvidia:3.6-v2}"
 export IMAGE_TAR="${IMAGE_TAR:-/data/nfs3/flagtree-nvidia-3.6-v2.tar}"
 export INNER_CMD="$*"
 export REPO_ROOT
+export CURAND_CONTRACT_GIT_SHA="${CURAND_CONTRACT_GIT_SHA:-$(git -C "${REPO_ROOT}" rev-parse HEAD 2>/dev/null || true)}"
 
 SLURM_PARTITION="${SLURM_PARTITION:-debug}"
 NUM_GPUS="${NUM_GPUS:-1}"
@@ -27,6 +28,7 @@ NUM_MEM_MB=$((NUM_GPUS * MEM_PER_GPU_MB))
 echo "[h20] partition=${SLURM_PARTITION} gpus=${NUM_GPUS} cpus=${NUM_CPUS} mem=${NUM_MEM_MB}M time=${TIME_LIMIT}"
 echo "[h20] image=${IMAGE}"
 echo "[h20] repo=${REPO_ROOT}"
+echo "[h20] git_sha=${CURAND_CONTRACT_GIT_SHA:-unknown}"
 echo "[h20] inner_cmd=${INNER_CMD}"
 
 if [ "${DRY_RUN:-0}" = "1" ]; then
@@ -42,7 +44,7 @@ srun -p "${SLURM_PARTITION}" \
   --cpus-per-task="${NUM_CPUS}" \
   --mem="${NUM_MEM_MB}M" \
   --time="${TIME_LIMIT}" \
-  --export=ALL,IMAGE,IMAGE_TAR,INNER_CMD,REPO_ROOT \
+  --export=ALL,IMAGE,IMAGE_TAR,INNER_CMD,REPO_ROOT,CURAND_CONTRACT_GIT_SHA \
   bash -lc '
     set -euo pipefail
     echo "[h20] node=$(hostname) step_gpus=${SLURM_STEP_GPUS:-unset}"
@@ -57,6 +59,7 @@ srun -p "${SLURM_PARTITION}" \
       --gpus all \
       --shm-size=16g \
       -e CUDA_VISIBLE_DEVICES="${SLURM_STEP_GPUS:-0}" \
+      -e CURAND_CONTRACT_GIT_SHA="${CURAND_CONTRACT_GIT_SHA:-}" \
       -v "${REPO_ROOT}":/workspace \
       -w /workspace \
       "${IMAGE}" \

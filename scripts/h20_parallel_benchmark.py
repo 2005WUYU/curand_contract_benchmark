@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -32,6 +33,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
+    launcher_started_unix = time.time()
     args = parse_args()
     groups = {item.strip() for item in args.groups.split(",") if item.strip()}
     selected_specs = specs_for_groups(groups or {"all"})
@@ -57,10 +59,11 @@ def main() -> int:
         "shard_count": shard_count,
         "gpu_ids": gpu_ids,
         "root_dir": str(root_dir),
+        "launcher_started_unix": launcher_started_unix,
         "shards": [],
     }
 
-    processes: list[tuple[int, Path, subprocess.Popen[bytes], Any]] = []
+    processes: list[tuple[int, Path, subprocess.Popen[bytes], Any, dict[str, Any]]] = []
     for shard_index, specs in enumerate(shards):
         if not specs:
             continue
@@ -82,30 +85,39 @@ def main() -> int:
         env["CUDA_VISIBLE_DEVICES"] = gpu_id
         env["CURAND_CONTRACT_SHARD"] = str(shard_index)
         env["CURAND_CONTRACT_SHARD_COUNT"] = str(shard_count)
-        manifest["shards"].append(
-            {
-                "shard": shard_index,
-                "gpu": gpu_id,
-                "tasks": task_ids,
-                "run_dir": str(run_dir),
-                "log": str(log_path),
-            }
-        )
+        shard_manifest = {
+            "shard": shard_index,
+            "gpu": gpu_id,
+            "tasks": task_ids,
+            "run_dir": str(run_dir),
+            "log": str(log_path),
+            "launch_started_unix": time.time(),
+        }
+        manifest["shards"].append(shard_manifest)
         log_file = log_path.open("wb")
         print(f"[h20-parallel] launch shard={shard_index} gpu={gpu_id} tasks={len(task_ids)} log={log_path}", flush=True)
-        processes.append((shard_index, run_dir, subprocess.Popen(command, cwd=REPO_ROOT, env=env, stdout=log_file, stderr=subprocess.STDOUT), log_file))
+        process = subprocess.Popen(command, cwd=REPO_ROOT, env=env, stdout=log_file, stderr=subprocess.STDOUT)
+        processes.append((shard_index, run_dir, process, log_file, shard_manifest))
 
     write_json(root_dir / "parallel_manifest.json", manifest)
 
     failures: list[str] = []
-    for shard_index, run_dir, process, log_file in processes:
+    for shard_index, run_dir, process, log_file, shard_manifest in processes:
         rc = process.wait()
+        shard_ended_unix = time.time()
         log_file.close()
+        shard_manifest["exit_code"] = rc
+        shard_manifest["ended_unix"] = shard_ended_unix
+        shard_manifest["elapsed_seconds"] = shard_ended_unix - float(shard_manifest["launch_started_unix"])
         if rc != 0:
             failures.append(f"shard {shard_index} failed with exit code {rc}; see {root_dir / f'shard_{shard_index:02d}.log'}")
         else:
-            print(f"[h20-parallel] shard={shard_index} done run_dir={run_dir}", flush=True)
+            print(f"[h20-parallel] shard={shard_index} done elapsed_seconds={shard_manifest['elapsed_seconds']:.3f} run_dir={run_dir}", flush=True)
 
+    shards_ended_unix = time.time()
+    manifest["shards_ended_unix"] = shards_ended_unix
+    manifest["shard_phase_elapsed_seconds"] = shards_ended_unix - launcher_started_unix
+    write_json(root_dir / "parallel_manifest.json", manifest)
     if failures:
         raise SystemExit("\n".join(failures))
 
@@ -113,7 +125,7 @@ def main() -> int:
     environment: dict[str, Any] | None = None
     shard_environments: list[dict[str, Any]] = []
     shard_capability_matrices: list[dict[str, Any]] = []
-    for _, run_dir, _, _ in processes:
+    for _, run_dir, _, _, _ in processes:
         if environment is None and (run_dir / "environment.json").exists():
             environment = json.loads((run_dir / "environment.json").read_text(encoding="utf-8"))
         if (run_dir / "environment.json").exists():
@@ -133,11 +145,22 @@ def main() -> int:
         "shard_count": shard_count,
         "gpu_ids": gpu_ids,
         "groups": args.groups,
+        "launcher_started_unix": launcher_started_unix,
+        "shards_ended_unix": shards_ended_unix,
+        "shard_phase_elapsed_seconds": shards_ended_unix - launcher_started_unix,
+        "shards": manifest["shards"],
         "shard_environments": shard_environments,
     }
     capability_matrix = _merge_capability_matrices(shard_capability_matrices)
     finalize_records(records)
 
+    aggregation_ended_unix = time.time()
+    manifest["aggregation_ended_unix"] = aggregation_ended_unix
+    manifest["elapsed_seconds_before_output_write"] = aggregation_ended_unix - launcher_started_unix
+    environment["parallel_launcher"]["aggregation_ended_unix"] = aggregation_ended_unix
+    environment["parallel_launcher"]["elapsed_seconds_before_output_write"] = aggregation_ended_unix - launcher_started_unix
+
+    write_json(root_dir / "parallel_manifest.json", manifest)
     write_json(root_dir / "environment.json", environment)
     write_json(root_dir / "capability_matrix.json", capability_matrix)
     write_task_registry(root_dir / "task_registry.json", selected_specs)
@@ -161,6 +184,7 @@ def main() -> int:
         f"pass={pass_count} fail={fail_count} unsupported={unsupported_count}",
         flush=True,
     )
+    print(f"[h20-parallel] elapsed_seconds_before_output_write={aggregation_ended_unix - launcher_started_unix:.3f}", flush=True)
     print(f"[h20-parallel] report: {root_dir / 'REPORT.md'}", flush=True)
     return 0
 

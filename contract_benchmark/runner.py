@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import platform
 import subprocess
 import sys
@@ -149,6 +150,9 @@ def collect_environment(profile_name: str) -> dict[str, Any]:
     except Exception as exc:
         env["triton_version_error"] = str(exc)
     env["git"] = _git_info()
+    launcher_git_commit = os.environ.get("CURAND_CONTRACT_GIT_SHA")
+    if launcher_git_commit:
+        env["launcher_git_commit"] = launcher_git_commit
     return env
 
 
@@ -829,7 +833,7 @@ def _run_e0(ctx: BenchmarkContext, spec: TaskSpec) -> list[dict[str, Any]]:
             validation = validation_pass(
                 {
                     "outcome_recorded": True,
-                    "expected_raised": expected_raised,
+                    "expected_raised": "yes" if expected_raised else "no",
                     "raised_matches_expected": bool(outcome.get("raised")) == expected_raised,
                     "failure_not_aggregated_as_speedup": True,
                 }
@@ -1661,10 +1665,14 @@ def _e0_flagrand_odd_philox_n(ctx: BenchmarkContext) -> dict[str, Any]:
 
 
 def _git_info() -> dict[str, Any]:
+    launcher_git_commit = os.environ.get("CURAND_CONTRACT_GIT_SHA")
     try:
-        root = Path(__file__).resolve().parents[2]
+        root = Path(__file__).resolve().parents[1]
         sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True, stderr=subprocess.DEVNULL).strip()
         status = subprocess.check_output(["git", "status", "--short"], cwd=root, text=True, stderr=subprocess.DEVNULL)
-        return {"commit": sha, "dirty": bool(status.strip()), "status_short": status.splitlines()[:20]}
+        return {"commit": sha, "dirty": bool(status.strip()), "status_short": status.splitlines()[:20], "source": "git"}
     except Exception as exc:
-        return {"error": str(exc)}
+        info: dict[str, Any] = {"error": str(exc)}
+        if launcher_git_commit:
+            info.update({"commit": launcher_git_commit, "dirty": None, "status_short": [], "source": "CURAND_CONTRACT_GIT_SHA"})
+        return info
