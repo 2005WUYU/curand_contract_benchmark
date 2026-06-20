@@ -1,101 +1,120 @@
 # H20 / 公司集群运行指南
 
-## 1. 目标
+## 1. 先说清楚运行边界
 
-这个仓库已经包含两部分：
+H20 集群登录节点没有 GPU，`nvidia-smi` 找不到是正常的。不要在登录节点裸跑 benchmark，也不要在登录节点手动折腾 Python CUDA 环境。
+
+正确外层是：
+
+```text
+登录节点 clone / 编辑 / 发起任务
+  -> srun 申请 H20 计算节点 GPU
+    -> 计算节点内 docker run 项目指定镜像
+      -> 容器内部执行 python run_benchmark.py
+```
+
+本仓库已经包含：
 
 - `contract_benchmark/`：新的 contract-style cuRAND benchmark。
 - `src/flagrand/`：运行 benchmark 必需的 FlagRand 源码与 Sobol/MTGP 参数数据。
+- `scripts/h20_*.sh`：按公司 Slurm + Docker 规范封装的运行脚本。
 
-因此在公司集群上直接 clone 本仓库即可运行，不需要再额外复制 `flagrand-main/src`。
+因此公司集群上 clone 本仓库即可运行，不需要再额外复制 `flagrand-main/src`。
 
-## 2. 已知旧 H20 环境参考
+## 2. 来自公司规范的关键约束
 
-旧测试目录：
-
-```text
-E:\20251018project\internship_flaggem\flagrand-main\20260615-185511-h20-full-fast
-```
-
-旧 `environment.json` 记录的关键信息：
+参考本地规范目录：
 
 ```text
-GPU: NVIDIA H20
-driver: 590.48.01
-CUDA_VISIBLE_DEVICES: 0
-python: 3.12.3
-torch: 2.8.0a0+5228986c39.nv25.5
-cwd: /workspace
-old timing_mode: api_cuda_event
-old stream_mode: continuous_stream
+E:\20251018project\internship_flaggem\公司集群使用规范
 ```
 
-旧 summary 的 geomean speedup 主要是：
+本 benchmark 用到的关键文件：
 
-```text
-philox raw: 0.5266
-xorwow raw: 0.4404
-mrg32k3a raw: 0.5342
-uniform public/fused path: 0.2436
-normal: 0.2566
-lognormal: 0.2604
-poisson: 0.3392
-```
+- `H20-slurm使用规范.md`
+- `第一阶段跑通步骤.md`
+- `grun使用指南.md`
+- `gpu-check使用文档.md`
 
-这些是旧 public API CUDA-event 口径，不要和新 contract benchmark 的任务直接混成同一个结论。
+必须遵守的点：
 
-## 3. Clone
+- H20 只有计算节点有 GPU，必须通过 Slurm 排队使用。
+- `srun` 不要用 `--gpus-per-task`，使用 `--gres=gpu:<N>`。
+- `debug` 队列优先级高但限时 1 小时；正式长跑用 `long`。
+- 公司第一阶段文档指定使用 Docker 镜像 `flagtree-nvidia:3.6-v2`。
+- 计算节点第一次没有镜像时，从 `/data/nfs3/flagtree-nvidia-3.6-v2.tar` 加载。
+- Docker 异常退出时要确认容器是否残留；本仓库脚本使用 `docker run --rm`，但异常中断后仍建议检查。
+- `grun` 是不支持 `srun` 的开发机上的用卡工具，不是 H20 Slurm 正式跑法。
+
+## 3. 登录节点准备
 
 ```bash
-cd /workspace
+sinfo
+sinfo -N -h -O NodeHost:20,Gres:30,GresUsed:30 | sort -u
+```
+
+看到 `debug` 或 `long` 队列里有可用节点后，clone 仓库：
+
+```bash
+mkdir -p ~/workspace
+cd ~/workspace
 git clone https://github.com/2005WUYU/curand_contract_benchmark.git
 cd curand_contract_benchmark
 ```
 
-如果公司网络更适合 SSH：
+如果公司网络或账号更适合 SSH：
 
 ```bash
 git clone git@github.com:2005WUYU/curand_contract_benchmark.git
 cd curand_contract_benchmark
 ```
 
-## 4. 环境检查
+## 4. GPU 与 Docker 预检
 
-优先使用公司镜像里已有的 PyTorch CUDA 环境。先检查：
+先只申请 1 张 H20 做最小验证：
 
 ```bash
-python - <<'PY'
-import torch, sys
-print("python", sys.version)
-print("torch", torch.__version__)
-print("cuda", torch.version.cuda)
-print("cuda_available", torch.cuda.is_available())
-if torch.cuda.is_available():
-    print("device", torch.cuda.get_device_name(0))
-    print("capability", torch.cuda.get_device_capability(0))
-PY
-
-nvidia-smi
+srun -p debug --gres=gpu:1 --cpus-per-task=4 --mem=16G --time=00:10:00 bash -lc '
+  hostname
+  nvidia-smi
+'
 ```
 
-如果 `triton` 不存在：
+再验证 Docker 镜像：
 
 ```bash
-python -m pip install triton
+srun -p debug --gres=gpu:1 --cpus-per-task=4 --mem=16G --time=00:20:00 bash -lc '
+  docker image inspect flagtree-nvidia:3.6-v2 >/dev/null 2>&1 || docker load -i /data/nfs3/flagtree-nvidia-3.6-v2.tar
+  docker run --rm --gpus all \
+    -e CUDA_VISIBLE_DEVICES=${SLURM_STEP_GPUS:-0} \
+    flagtree-nvidia:3.6-v2 \
+    bash -lc "python - <<PY
+import sys, torch, triton
+print(sys.version)
+print(\"torch\", torch.__version__, \"cuda\", torch.version.cuda)
+print(\"triton\", triton.__version__)
+print(\"cuda available\", torch.cuda.is_available())
+print(\"device\", torch.cuda.get_device_name(0))
+PY"
+'
 ```
 
-如果要 editable install：
+## 5. 推荐：直接用仓库脚本跑
+
+### 5.1 Smoke
+
+在仓库根目录执行：
 
 ```bash
-python -m pip install -e .
+bash scripts/h20_smoke.sh
 ```
 
-本 benchmark 的 `run_benchmark.py` 也会把仓库内 `src/` 加入 `sys.path`，所以不 install 也能运行。
+它实际做的是：
 
-## 5. 先跑 smoke
-
-```bash
-CUDA_VISIBLE_DEVICES=0 python run_benchmark.py --profile local_smoke
+```text
+srun -p debug --gres=gpu:1 ...
+  docker run --rm --gpus all -v "$PWD":/workspace -w /workspace flagtree-nvidia:3.6-v2
+    python run_benchmark.py --profile local_smoke
 ```
 
 期望：
@@ -113,43 +132,82 @@ unsupported 可以存在
 
 这些不是 smoke 失败，但必须保留在结果里。
 
-## 6. 构建 legacy cuRAND Device API 强基线
+### 5.2 分阶段正式跑
 
-如果集群有完整 CUDA Toolkit、NVCC 和 PyTorch extension 构建能力，执行：
-
-```bash
-CUDA_VISIBLE_DEVICES=0 python native/build_curand_device_extension.py --verbose
-```
-
-构建成功后再跑 fused 任务，结果中会出现：
-
-```text
-backend = curand_legacy_device_fused
-api_surface = legacy_device_api_extension
-```
-
-如果构建失败，不要手动删掉 unsupported 结果；把 build log 和 `unsupported_reason` 放进报告。
-
-## 7. 正式 H20 跑法
-
-建议分三段跑，避免一次全量失败难定位：
+先跑 Host API 与基础任务，适合 `debug` 队列：
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 python run_benchmark.py --profile h20 --groups stage0,stage1
-CUDA_VISIBLE_DEVICES=0 python native/build_curand_device_extension.py --verbose
-CUDA_VISIBLE_DEVICES=0 python run_benchmark.py --profile h20 --groups stage2,stage3,stage4
+SLURM_PARTITION=debug \
+TIME_LIMIT=01:00:00 \
+PROFILE=h20 \
+GROUPS=stage0,stage1 \
+BUILD_DEVICE_EXT=0 \
+bash scripts/h20_benchmark.sh
+```
+
+再构建 legacy cuRAND Device API extension，并跑 fused / memory / QRNG 等后续任务。建议用 `long` 队列：
+
+```bash
+SLURM_PARTITION=long \
+TIME_LIMIT=08:00:00 \
+PROFILE=h20 \
+GROUPS=stage2,stage3,stage4 \
+BUILD_DEVICE_EXT=1 \
+bash scripts/h20_benchmark.sh
 ```
 
 如果希望一次全跑：
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 python run_benchmark.py --profile h20 --groups all
+SLURM_PARTITION=long \
+TIME_LIMIT=08:00:00 \
+PROFILE=h20 \
+GROUPS=all \
+BUILD_DEVICE_EXT=1 \
+bash scripts/h20_benchmark.sh
 ```
+
+### 5.3 可调参数
+
+脚本支持这些环境变量：
+
+```text
+SLURM_PARTITION   默认 smoke=debug，benchmark=long
+TIME_LIMIT        默认 smoke=01:00:00，benchmark=08:00:00
+NUM_GPUS          默认 1
+CPUS_PER_GPU      smoke 默认 8，benchmark 默认 24
+MEM_PER_GPU_MB    smoke 默认 32768，benchmark 默认 242144
+IMAGE             默认 flagtree-nvidia:3.6-v2
+IMAGE_TAR         默认 /data/nfs3/flagtree-nvidia-3.6-v2.tar
+PROFILE           默认 h20
+GROUPS            默认 all
+BUILD_DEVICE_EXT  1 表示先尝试构建 native cuRAND Device API extension
+```
+
+## 6. 手写 srun 命令时的等价写法
+
+如果不用脚本，外层也必须是 Slurm + Docker。下面是 smoke 的等价命令：
+
+```bash
+srun -p debug --gres=gpu:1 --cpus-per-task=8 --mem=32G --time=01:00:00 bash -lc '
+  docker image inspect flagtree-nvidia:3.6-v2 >/dev/null 2>&1 || docker load -i /data/nfs3/flagtree-nvidia-3.6-v2.tar
+  docker run --rm --gpus all \
+    -e CUDA_VISIBLE_DEVICES=${SLURM_STEP_GPUS:-0} \
+    -v "$PWD":/workspace \
+    -w /workspace \
+    flagtree-nvidia:3.6-v2 \
+    bash -lc "python run_benchmark.py --profile local_smoke"
+'
+```
+
+正式 H20 不建议全手写，优先用 `scripts/h20_benchmark.sh`，避免漏掉资源、镜像、挂载、工作目录和 `CUDA_VISIBLE_DEVICES`。
+
+## 7. 输出结构
 
 结果目录：
 
 ```text
-results/<timestamp>_h20/
+results/<timestamp>_<profile>/
   environment.json
   capability_matrix.json
   task_registry.json
@@ -207,7 +265,42 @@ FlagRand RNG 本体因此比 cuRAND 快。
 
 要回答 RNG 本体，看 `H0` 或 Device output-only 任务。
 
-## 9. 结果回传
+## 9. 旧 H20 benchmark 参考
+
+旧测试目录：
+
+```text
+E:\20251018project\internship_flaggem\flagrand-main\20260615-185511-h20-full-fast
+```
+
+旧 `environment.json` 记录的关键信息：
+
+```text
+GPU: NVIDIA H20
+driver: 590.48.01
+CUDA_VISIBLE_DEVICES: 0
+python: 3.12.3
+torch: 2.8.0a0+5228986c39.nv25.5
+cwd: /workspace
+old timing_mode: api_cuda_event
+old stream_mode: continuous_stream
+```
+
+旧 summary 的 geomean speedup 主要是：
+
+```text
+philox raw: 0.5266
+xorwow raw: 0.4404
+mrg32k3a raw: 0.5342
+uniform public/fused path: 0.2436
+normal: 0.2566
+lognormal: 0.2604
+poisson: 0.3392
+```
+
+这些是旧 public API CUDA-event 口径，不要和新 contract benchmark 的任务直接混成同一个结论。
+
+## 10. 结果回传
 
 建议只打包最终结果目录：
 
@@ -223,14 +316,31 @@ tar -czf contract_benchmark_h20_debug.tar.gz \
   native/build
 ```
 
-## 10. 常见问题
+## 11. 常见问题
+
+### 登录节点 `nvidia-smi` 失败
+
+正常。登录节点没有 GPU。用 `srun` 申请计算节点后再测。
+
+### Docker 权限失败
+
+当前用户可能没有 Docker 权限，需要找运维或 mentor 开权限。
+
+### 镜像不存在
+
+脚本会自动尝试：
+
+```bash
+docker load -i /data/nfs3/flagtree-nvidia-3.6-v2.tar
+```
+
+如果这个路径不可读，换节点或找 mentor 确认镜像路径。
 
 ### 找不到 `flagrand`
 
-确认当前目录就是 clone 下来的仓库根目录：
+确认容器内工作目录是 `/workspace`，并且挂载的是本仓库根目录：
 
 ```bash
-pwd
 ls src/flagrand
 python - <<'PY'
 import sys
@@ -249,7 +359,7 @@ ldconfig -p | grep curand || true
 find /usr/local -name 'libcurand.so*' 2>/dev/null | head
 ```
 
-必要时：
+必要时在容器内设置：
 
 ```bash
 export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
@@ -257,11 +367,10 @@ export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
 
 ### Device extension 构建失败
 
-先跑 Host API 阶段：
+先保留 Host API 阶段结果：
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 python run_benchmark.py --profile h20 --groups stage0,stage1
+SLURM_PARTITION=debug GROUPS=stage0,stage1 BUILD_DEVICE_EXT=0 bash scripts/h20_benchmark.sh
 ```
 
 Device/Dx 缺失会作为 unsupported 记录，不能把这些行当成性能结论。
-

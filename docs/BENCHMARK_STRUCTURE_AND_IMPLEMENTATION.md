@@ -235,12 +235,11 @@ poisson: 0.3392
 
 ## 8. H20 正式分析建议
 
-H20 上建议按顺序执行：
+H20 登录节点没有 GPU，不要在登录节点裸跑 `python`。正式运行按公司规范走 Slurm + Docker，完整命令见 `docs/H20_CLUSTER_RUN_GUIDE.md`。建议按顺序执行：
 
 ```bash
-python curand_contract_benchmark/run_benchmark.py --profile h20 --groups stage0,stage1
-python curand_contract_benchmark/native/build_curand_device_extension.py --verbose
-python curand_contract_benchmark/run_benchmark.py --profile h20 --groups stage2,stage3,stage4
+SLURM_PARTITION=debug TIME_LIMIT=01:00:00 PROFILE=h20 GROUPS=stage0,stage1 BUILD_DEVICE_EXT=0 bash scripts/h20_benchmark.sh
+SLURM_PARTITION=long TIME_LIMIT=08:00:00 PROFILE=h20 GROUPS=stage2,stage3,stage4 BUILD_DEVICE_EXT=1 bash scripts/h20_benchmark.sh
 ```
 
 正式报告应优先回答：

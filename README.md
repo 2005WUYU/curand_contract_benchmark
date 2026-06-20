@@ -33,23 +33,34 @@ records=419 pass=353 fail=0 unsupported=66
 
 ## H20 正式运行
 
-依赖前提：
+H20 登录节点没有 GPU，不要在登录节点裸跑 `python run_benchmark.py`。正式运行必须先用 Slurm 申请计算节点，再在计算节点里启动公司指定 Docker 镜像。
 
-- Python environment with PyTorch CUDA build.
-- Triton.
-- CUDA Toolkit / cuRAND shared library available on library path.
+先看完整指南：
 
-```bash
-cd /path/to/flagrand-main
-python curand_contract_benchmark/run_benchmark.py --profile h20
+```text
+docs/H20_CLUSTER_RUN_GUIDE.md
 ```
 
-可选强基线：先构建 legacy cuRAND Device API fused extension。
+最小 smoke：
 
 ```bash
-python curand_contract_benchmark/native/build_curand_device_extension.py --verbose
-python curand_contract_benchmark/run_benchmark.py --profile h20 --groups all
+bash scripts/h20_smoke.sh
 ```
+
+分阶段正式跑：
+
+```bash
+SLURM_PARTITION=debug TIME_LIMIT=01:00:00 PROFILE=h20 GROUPS=stage0,stage1 BUILD_DEVICE_EXT=0 bash scripts/h20_benchmark.sh
+SLURM_PARTITION=long TIME_LIMIT=08:00:00 PROFILE=h20 GROUPS=stage2,stage3,stage4 BUILD_DEVICE_EXT=1 bash scripts/h20_benchmark.sh
+```
+
+一次全跑：
+
+```bash
+SLURM_PARTITION=long TIME_LIMIT=08:00:00 PROFILE=h20 GROUPS=all BUILD_DEVICE_EXT=1 bash scripts/h20_benchmark.sh
+```
+
+这些脚本外层使用 `srun --gres=gpu:<N>`，内层使用 `flagtree-nvidia:3.6-v2`，镜像缺失时会尝试从 `/data/nfs3/flagtree-nvidia-3.6-v2.tar` 加载。
 
 ## 输出结构
 
