@@ -197,8 +197,14 @@ def run_specs(ctx: BenchmarkContext, selected_specs: list[TaskSpec]) -> tuple[li
             elif spec.task_id == "A2_FIXED_CHUNK_CALLS_SWEEP":
                 for calls in [1, max(2, ctx.profile.many_small_calls // 4), ctx.profile.many_small_calls]:
                     records.extend(_run_many_small(ctx, spec, calls=calls))
-            elif spec.task_id in {"K0_DEVICE_RAW_OUTPUT", "K1_DEVICE_UNIFORM_OUTPUT", "M3_DEVICE_DX_FUSED_CONSUME", "E1_COMPILE_SUPPORT_MATRIX"}:
-                records.extend(_run_device_unsupported(ctx, spec))
+            elif spec.task_id == "K0_DEVICE_RAW_OUTPUT":
+                records.extend(_run_device_raw_output(ctx, spec))
+            elif spec.task_id == "K1_DEVICE_UNIFORM_OUTPUT":
+                records.extend(_run_device_uniform_output(ctx, spec))
+            elif spec.task_id == "M3_DEVICE_DX_FUSED_CONSUME":
+                records.extend(_run_m3_device_fused_consume(ctx, spec))
+            elif spec.task_id == "E1_COMPILE_SUPPORT_MATRIX":
+                records.extend(_run_e1_compile_support_matrix(ctx, spec))
             elif spec.task_id == "F0_THRESHOLD_BERNOULLI":
                 records.extend(_run_threshold(ctx, spec))
             elif spec.task_id == "F1_ADD_UNIFORM":
@@ -292,6 +298,8 @@ def _run_g2(ctx: BenchmarkContext, spec: TaskSpec) -> list[dict[str, Any]]:
             a = torch.empty(n, device=ctx.device, dtype=torch.int32)
             b = torch.empty_like(a)
             c = torch.empty_like(a)
+            d = torch.empty_like(a)
+            e = torch.empty_like(a)
             if backend == "curand_host":
                 with make_curand_generator(generator, seed=ctx.seed, offset=0, ordering="legacy") as gen:
                     gen.generate_raw_u32(a)
@@ -299,18 +307,30 @@ def _run_g2(ctx: BenchmarkContext, spec: TaskSpec) -> list[dict[str, Any]]:
                     gen.generate_raw_u32(b)
                 with make_curand_generator(generator, seed=ctx.seed + 1, offset=0, ordering="legacy") as gen:
                     gen.generate_raw_u32(c)
+                with make_curand_generator(generator, seed=ctx.seed, offset=n, ordering="legacy") as gen:
+                    gen.generate_raw_u32(d)
+                with make_curand_generator(generator, seed=ctx.seed, offset=0, ordering="legacy") as gen:
+                    gen.generate_raw_u32(e)
+                    gen.generate_raw_u32(e)
             else:
                 gen_a = make_flagrand_generator(generator, seed=ctx.seed, offset=0)
                 gen_b = make_flagrand_generator(generator, seed=ctx.seed, offset=0)
                 gen_c = make_flagrand_generator(generator, seed=ctx.seed + 1, offset=0)
+                gen_d = make_flagrand_generator(generator, seed=ctx.seed, offset=n)
+                gen_e = make_flagrand_generator(generator, seed=ctx.seed, offset=0)
                 flagrand_generate_raw(a, gen_a)
                 flagrand_generate_raw(b, gen_b)
                 flagrand_generate_raw(c, gen_c)
+                flagrand_generate_raw(d, gen_d)
+                flagrand_generate_raw(e, gen_e)
+                flagrand_generate_raw(e, gen_e)
             torch.cuda.synchronize()
             validation = validation_pass(
                 {
                     "same_seed_same_output": tensors_equal(a, b),
                     "changed_seed_changes_output": not tensors_equal(a, c),
+                    "changed_offset_changes_output": not tensors_equal(a, d),
+                    "same_generator_second_call_advances": not tensors_equal(a, e),
                 }
             )
             records.append(_gate_record(ctx, spec, backend, generator, "raw32", n, validation))
@@ -502,27 +522,56 @@ def _run_generate_seeds(ctx: BenchmarkContext, spec: TaskSpec) -> list[dict[str,
     return records
 
 
+def _make_uniform_once(
+    ctx: BenchmarkContext,
+    backend: str,
+    generator: str,
+    out: torch.Tensor,
+) -> tuple[Callable[[], object], Callable[[], None]]:
+    if backend == "curand_host":
+        gen = make_curand_generator(generator, seed=ctx.seed, offset=ctx.offset, ordering="legacy")
+
+        def cleanup() -> None:
+            gen.destroy()
+
+        return lambda: gen.generate_uniform_f32(out), cleanup
+
+    gen = make_flagrand_generator(generator, seed=ctx.seed, offset=ctx.offset)
+    return lambda: flagrand_generate_by_distribution(gen, out, "uniform_f32"), lambda: None
+
+
 def _run_first_vs_steady(ctx: BenchmarkContext, spec: TaskSpec) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     generator = "philox4x32_10"
     n = _adjust_n(ctx.profile.gate_n, generator, "uniform_f32")
     for backend in ("curand_host", "flagrand_public"):
-        out = torch.empty(n, device=ctx.device, dtype=torch.float32)
         try:
             if backend == "curand_host":
-                gen = make_curand_generator(generator, seed=ctx.seed, offset=ctx.offset, ordering="legacy")
-                run_once = lambda: gen.generate_uniform_f32(out)
                 api_surface = "curand_host_api"
             else:
-                gen = make_flagrand_generator(generator, seed=ctx.seed, offset=ctx.offset)
-                run_once = lambda: flagrand_generate_by_distribution(gen, out, "uniform_f32")
                 api_surface = "flagrand_public_api"
-            validation = _validate_after(run_once, lambda: validate_uniform(out, n=n))
-            first_timing = collect_cuda_event_and_wall_us(run_once, warmup_iters=0, repeats=1)
-            steady_timing = collect_cuda_event_and_wall_us(run_once, warmup_iters=ctx.profile.warmup, repeats=ctx.profile.repeats)
-            if backend == "curand_host":
-                gen.destroy()
-            for phase, timing in (("first", first_timing), ("steady", steady_timing)):
+
+            validation_out = torch.empty(n, device=ctx.device, dtype=torch.float32)
+            validation_run, validation_cleanup = _make_uniform_once(ctx, backend, generator, validation_out)
+            try:
+                validation = _validate_after(validation_run, lambda: validate_uniform(validation_out, n=n))
+            finally:
+                validation_cleanup()
+
+            timings = []
+            for phase, warmup_iters, repeats in (
+                ("first", 0, 1),
+                ("steady", ctx.profile.warmup, ctx.profile.repeats),
+            ):
+                out = torch.empty(n, device=ctx.device, dtype=torch.float32)
+                run_once, cleanup = _make_uniform_once(ctx, backend, generator, out)
+                try:
+                    timing = collect_cuda_event_and_wall_us(run_once, warmup_iters=warmup_iters, repeats=repeats)
+                finally:
+                    cleanup()
+                timings.append((phase, timing))
+
+            for phase, timing in timings:
                 records.append(
                     _timed_record(
                         ctx,
@@ -534,7 +583,11 @@ def _run_first_vs_steady(ctx: BenchmarkContext, spec: TaskSpec) -> list[dict[str
                         n,
                         timing,
                         validation,
-                        parameters={"phase": phase},
+                        parameters={
+                            "phase": phase,
+                            "timing_semantics": "fresh_generator_after_separate_validation",
+                            "first_warmup_iters": 0,
+                        },
                         comparison_key=f"{spec.task_id}:{phase}:{generator}:{n}",
                         is_baseline=backend == "curand_host",
                         baseline_id=f"curand_host_{phase}",
@@ -751,16 +804,23 @@ def _run_q1(ctx: BenchmarkContext, spec: TaskSpec) -> list[dict[str, Any]]:
 def _run_e0(ctx: BenchmarkContext, spec: TaskSpec) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     cases = [
-        ("curand_invalid_lambda", "curand_host", _e0_curand_invalid_lambda),
-        ("curand_odd_normal_n", "curand_host", _e0_curand_odd_normal_n),
-        ("curand_invalid_dimensions", "curand_host", _e0_curand_invalid_dimensions),
-        ("flagrand_invalid_lambda", "flagrand_public", _e0_flagrand_invalid_lambda),
-        ("flagrand_odd_philox_n", "flagrand_public", _e0_flagrand_odd_philox_n),
+        ("curand_invalid_lambda", "curand_host", _e0_curand_invalid_lambda, True),
+        ("curand_odd_normal_n", "curand_host", _e0_curand_odd_normal_n, True),
+        ("curand_invalid_dimensions", "curand_host", _e0_curand_invalid_dimensions, True),
+        ("flagrand_invalid_lambda", "flagrand_public", _e0_flagrand_invalid_lambda, True),
+        ("flagrand_odd_philox_n", "flagrand_public", _e0_flagrand_odd_philox_n, True),
     ]
-    for case_id, backend, fn in cases:
+    for case_id, backend, fn, expected_raised in cases:
         try:
             outcome = fn(ctx)
-            validation = validation_pass({"outcome_recorded": True, "failure_not_aggregated_as_speedup": True})
+            validation = validation_pass(
+                {
+                    "outcome_recorded": True,
+                    "expected_raised": expected_raised,
+                    "raised_matches_expected": bool(outcome.get("raised")) == expected_raised,
+                    "failure_not_aggregated_as_speedup": True,
+                }
+            )
             validation["observed_error"] = outcome
         except BaseException as exc:
             validation = validation_error(exc)
@@ -770,14 +830,256 @@ def _run_e0(ctx: BenchmarkContext, spec: TaskSpec) -> list[dict[str, Any]]:
     return records
 
 
-def _run_device_unsupported(ctx: BenchmarkContext, spec: TaskSpec) -> list[dict[str, Any]]:
-    cap = capability_matrix()
-    records = []
-    device_reason = cap.get("device_api_extension", {}).get("unsupported_reason") or "legacy Device API extension not available"
-    dx_reason = cap.get("curanddx", {}).get("unsupported_reason") or "cuRANDDx not available"
-    records.append(_unsupported_record(ctx, spec, "curand_legacy_device", device_reason))
-    records.append(_unsupported_record(ctx, spec, "curanddx", dx_reason))
+def _run_device_raw_output(ctx: BenchmarkContext, spec: TaskSpec) -> list[dict[str, Any]]:
+    from contract_benchmark.optional_device_api import find_built_curand_device_extension
+
+    records: list[dict[str, Any]] = []
+    ext, ext_reason = find_built_curand_device_extension()
+    parameters = _legacy_device_mapping_parameters(ctx)
+    if ext is None or not hasattr(ext, "philox_raw_u32"):
+        records.append(
+            _unsupported_record(
+                ctx,
+                spec,
+                "curand_legacy_device_output",
+                ext_reason or "legacy Device API extension does not expose philox_raw_u32",
+                generator="philox4x32_10",
+                distribution="raw32",
+                parameters=parameters,
+                baseline_id="curand_legacy_device_output",
+            )
+        )
+    else:
+        for n in ctx.profile.sizes:
+            out = torch.empty(n, device=ctx.device, dtype=torch.int32)
+            run_once = lambda: ext.philox_raw_u32(out, ctx.seed, ctx.offset)
+            validation = _validate_after(run_once, lambda: validate_raw_tensor(out, dtype=torch.int32, n=n))
+            timing = collect_cuda_event_and_wall_us(run_once, warmup_iters=ctx.profile.warmup, repeats=ctx.profile.repeats)
+            records.append(
+                _timed_record(
+                    ctx,
+                    spec,
+                    "curand_legacy_device_output",
+                    "legacy_device_api_extension",
+                    "philox4x32_10",
+                    "raw32",
+                    n,
+                    timing,
+                    validation,
+                    parameters=parameters,
+                    comparison_key=f"{spec.task_id}:legacy_device:philox4x32_10:{n}",
+                    is_baseline=True,
+                    baseline_id="curand_legacy_device_output",
+                    temporary_bytes=0,
+                    output_bytes=n * 4,
+                )
+            )
+    records.append(_curanddx_unsupported_record(ctx, spec, generator="philox4x32_10", distribution="raw32"))
     return records
+
+
+def _run_device_uniform_output(ctx: BenchmarkContext, spec: TaskSpec) -> list[dict[str, Any]]:
+    from contract_benchmark.optional_device_api import find_built_curand_device_extension
+
+    records: list[dict[str, Any]] = []
+    ext, ext_reason = find_built_curand_device_extension()
+    parameters = _legacy_device_mapping_parameters(ctx)
+    if ext is None or not hasattr(ext, "philox_uniform"):
+        records.append(
+            _unsupported_record(
+                ctx,
+                spec,
+                "curand_legacy_device_output",
+                ext_reason or "legacy Device API extension does not expose philox_uniform",
+                generator="philox4x32_10",
+                distribution="uniform_f32",
+                parameters=parameters,
+                baseline_id="curand_legacy_device_output",
+            )
+        )
+    else:
+        for n in ctx.profile.sizes:
+            out = torch.empty(n, device=ctx.device, dtype=torch.float32)
+            run_once = lambda: ext.philox_uniform(out, ctx.seed, ctx.offset)
+            validation = _validate_after(run_once, lambda: validate_uniform(out, n=n, low_open=True))
+            timing = collect_cuda_event_and_wall_us(run_once, warmup_iters=ctx.profile.warmup, repeats=ctx.profile.repeats)
+            records.append(
+                _timed_record(
+                    ctx,
+                    spec,
+                    "curand_legacy_device_output",
+                    "legacy_device_api_extension",
+                    "philox4x32_10",
+                    "uniform_f32",
+                    n,
+                    timing,
+                    validation,
+                    parameters=parameters,
+                    comparison_key=f"{spec.task_id}:legacy_device:philox4x32_10:{n}",
+                    is_baseline=True,
+                    baseline_id="curand_legacy_device_output",
+                    temporary_bytes=0,
+                    output_bytes=n * 4,
+                )
+            )
+    records.append(_curanddx_unsupported_record(ctx, spec, generator="philox4x32_10", distribution="uniform_f32"))
+    return records
+
+
+def _run_m3_device_fused_consume(ctx: BenchmarkContext, spec: TaskSpec) -> list[dict[str, Any]]:
+    from contract_benchmark.optional_device_api import find_built_curand_device_extension
+
+    records: list[dict[str, Any]] = []
+    ext, ext_reason = find_built_curand_device_extension()
+    alpha = 0.25
+    if ext is None:
+        records.append(
+            _unsupported_record(
+                ctx,
+                spec,
+                "curand_legacy_device_fused",
+                ext_reason or "legacy Device API extension unavailable",
+                generator="philox4x32_10",
+                distribution="uniform_add_consume",
+                parameters={"alpha": alpha, **_legacy_device_mapping_parameters(ctx)},
+                baseline_id="curand_legacy_device_fused",
+            )
+        )
+        records.append(_curanddx_unsupported_record(ctx, spec, generator="philox4x32_10", distribution="uniform_add_consume"))
+        return records
+
+    for n0 in ctx.profile.sizes:
+        n = _adjust_n(n0, "philox4x32_10", "uniform_f32")
+        parameters = {"alpha": alpha, "operation": "y=x+alpha*(u-0.5)", **_legacy_device_mapping_parameters(ctx)}
+        comparison_key = f"{spec.task_id}:uniform_add_consume:{n}:legacy_device"
+        try:
+            legacy_rows = _run_legacy_device_fused_extension(
+                ctx,
+                spec,
+                ext,
+                n=n,
+                distribution="uniform_add_consume",
+                parameters=parameters,
+                comparison_key=comparison_key,
+            )
+        except BaseException as exc:
+            records.append(_error_record(ctx, spec, "curand_legacy_device_fused", exc, generator="philox4x32_10", distribution="uniform_add_consume", n=n, parameters=parameters))
+            records.append(_curanddx_unsupported_record(ctx, spec, generator="philox4x32_10", distribution="uniform_add_consume", n=n, parameters={"alpha": alpha, "operation": "y=x+alpha*(u-0.5)"}))
+            continue
+        records.extend(legacy_rows)
+
+        x = torch.linspace(0, 1, n, device=ctx.device, dtype=torch.float32)
+        out = torch.empty(n, device=ctx.device, dtype=torch.float32)
+        run_fused = lambda: kernels.fused_philox_add_uniform(x, out, seed=ctx.seed, alpha=alpha)
+        validation = _validate_after(run_fused, lambda: validate_finite_output(out, n=n))
+        timing = collect_cuda_event_and_wall_us(run_fused, warmup_iters=ctx.profile.warmup, repeats=ctx.profile.repeats)
+        records.append(
+            _timed_record(
+                ctx,
+                spec,
+                "flagrand_fused_philox",
+                "flagrand_benchmark_kernel",
+                "philox4x32_10",
+                "uniform_add_consume",
+                n,
+                timing,
+                validation,
+                parameters={"alpha": alpha, "operation": "y=x+alpha*(u-0.5)"},
+                comparison_key=comparison_key,
+                is_baseline=False,
+                baseline_id="curand_legacy_device_fused",
+                temporary_bytes=0,
+                output_bytes=n * 4,
+            )
+        )
+        records.append(
+            _curanddx_unsupported_record(
+                ctx,
+                spec,
+                generator="philox4x32_10",
+                distribution="uniform_add_consume",
+                n=n,
+                parameters={"alpha": alpha, "operation": "y=x+alpha*(u-0.5)"},
+            )
+        )
+    return records
+
+
+def _run_e1_compile_support_matrix(ctx: BenchmarkContext, spec: TaskSpec) -> list[dict[str, Any]]:
+    from contract_benchmark.optional_device_api import find_built_curand_device_extension
+
+    records: list[dict[str, Any]] = []
+    ext, ext_reason = find_built_curand_device_extension()
+    required_symbols = [
+        "philox_raw_u32",
+        "philox_uniform",
+        "philox_add_uniform",
+        "philox_threshold",
+        "philox_dropout",
+    ]
+    if ext is None:
+        records.append(
+            _unsupported_record(
+                ctx,
+                spec,
+                "curand_legacy_device",
+                ext_reason or "legacy Device API extension unavailable",
+                generator="philox4x32_10",
+                distribution="compile_support",
+                parameters={"required_symbols": required_symbols},
+            )
+        )
+    else:
+        checks = {"extension_importable": True}
+        checks.update({f"has_{symbol}": hasattr(ext, symbol) for symbol in required_symbols})
+        validation = validation_pass(checks)
+        record = _base_record(
+            ctx,
+            spec,
+            "curand_legacy_device",
+            "compile_support_matrix",
+            "philox4x32_10",
+            "compile_support",
+            0,
+            validation=validation,
+            parameters={"required_symbols": required_symbols, "source": "native/curand_contract_device_ext.cu"},
+        )
+        record.update({"formal_result": validation.get("status") == "pass", "audit_flags": []})
+        records.append(record)
+
+    records.append(_curanddx_unsupported_record(ctx, spec, generator="philox4x32_10", distribution="compile_support"))
+    return records
+
+
+def _legacy_device_mapping_parameters(ctx: BenchmarkContext) -> dict[str, Any]:
+    return {
+        "device_mapping": "curand_init(seed, sequence=linear_index, offset=absolute_offset)",
+        "absolute_offset": ctx.offset,
+        "host_order_exact_match": False,
+    }
+
+
+def _curanddx_unsupported_record(
+    ctx: BenchmarkContext,
+    spec: TaskSpec,
+    *,
+    generator: str,
+    distribution: str,
+    n: int = 0,
+    parameters: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    cap = capability_matrix()
+    return _unsupported_record(
+        ctx,
+        spec,
+        "curanddx",
+        cap.get("curanddx", {}).get("unsupported_reason") or "cuRANDDx headers/build integration are not configured in this local repository.",
+        generator=generator,
+        distribution=distribution,
+        n=n,
+        parameters=parameters,
+        baseline_id="curanddx",
+    )
 
 
 def _measure_curand_and_flagrand_raw(
@@ -915,14 +1217,14 @@ def _run_legacy_device_fused_extension(
     alpha = float(parameters.get("alpha", 0.25))
     if distribution == "uniform_threshold":
         mask = torch.empty(n, device=ctx.device, dtype=torch.uint8)
-        run_once = lambda: ext.philox_threshold(mask, ctx.seed, p)
+        run_once = lambda: ext.philox_threshold(mask, ctx.seed, ctx.offset, p)
         validation = _validate_after(run_once, lambda: validate_mask(mask, n=n, p=p))
         timing = collect_cuda_event_and_wall_us(run_once, warmup_iters=ctx.profile.warmup, repeats=ctx.profile.repeats)
         output_bytes = n
     elif distribution == "uniform_add_consume":
         x = torch.linspace(0, 1, n, device=ctx.device, dtype=torch.float32)
         out = torch.empty(n, device=ctx.device, dtype=torch.float32)
-        run_once = lambda: ext.philox_add_uniform(x, out, ctx.seed, alpha)
+        run_once = lambda: ext.philox_add_uniform(x, out, ctx.seed, ctx.offset, alpha)
         validation = _validate_after(run_once, lambda: validate_finite_output(out, n=n))
         timing = collect_cuda_event_and_wall_us(run_once, warmup_iters=ctx.profile.warmup, repeats=ctx.profile.repeats)
         output_bytes = n * 4
@@ -930,7 +1232,7 @@ def _run_legacy_device_fused_extension(
         x = torch.ones(n, device=ctx.device, dtype=torch.float32)
         out = torch.empty(n, device=ctx.device, dtype=torch.float32)
         mask = torch.empty(n, device=ctx.device, dtype=torch.uint8)
-        run_once = lambda: ext.philox_dropout(x, out, mask, ctx.seed, p)
+        run_once = lambda: ext.philox_dropout(x, out, mask, ctx.seed, ctx.offset, p)
         validation = _validate_after(run_once, lambda: _merge_validations(validate_finite_output(out, n=n), validate_mask(mask, n=n, p=p)))
         timing = collect_cuda_event_and_wall_us(run_once, warmup_iters=ctx.profile.warmup, repeats=ctx.profile.repeats)
         output_bytes = n * 5
@@ -1177,9 +1479,13 @@ def _error_record(
 
 def _compute_speedups(records: list[dict[str, Any]]) -> None:
     baselines: dict[str, dict[str, float]] = {}
+    seen_baseline_keys: set[str] = set()
     for record in records:
         key = record.get("comparison_key")
         if not key or not record.get("is_baseline"):
+            continue
+        seen_baseline_keys.add(key)
+        if not record.get("formal_result"):
             continue
         gpu = record.get("median_gpu_us")
         wall = record.get("median_wall_sync_us")
@@ -1188,7 +1494,12 @@ def _compute_speedups(records: list[dict[str, Any]]) -> None:
     for record in records:
         key = record.get("comparison_key")
         base = baselines.get(key)
+        record["speedup_baseline_formal"] = bool(base)
         if not key or not base:
+            if key in seen_baseline_keys and not record.get("is_baseline"):
+                flags = record.setdefault("audit_flags", [])
+                if "baseline_not_formal" not in flags:
+                    flags.append("baseline_not_formal")
             record.setdefault("speedup_gpu_vs_baseline", None)
             record.setdefault("speedup_wall_vs_baseline", None)
             continue

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import subprocess
@@ -109,12 +110,15 @@ def main() -> int:
 
     records: list[dict[str, Any]] = []
     environment: dict[str, Any] | None = None
-    capability_matrix: dict[str, Any] | None = None
+    shard_environments: list[dict[str, Any]] = []
+    shard_capability_matrices: list[dict[str, Any]] = []
     for _, run_dir, _, _ in processes:
         if environment is None and (run_dir / "environment.json").exists():
             environment = json.loads((run_dir / "environment.json").read_text(encoding="utf-8"))
-        if capability_matrix is None and (run_dir / "capability_matrix.json").exists():
-            capability_matrix = json.loads((run_dir / "capability_matrix.json").read_text(encoding="utf-8"))
+        if (run_dir / "environment.json").exists():
+            shard_environments.append(json.loads((run_dir / "environment.json").read_text(encoding="utf-8")))
+        if (run_dir / "capability_matrix.json").exists():
+            shard_capability_matrices.append(json.loads((run_dir / "capability_matrix.json").read_text(encoding="utf-8")))
         jsonl = run_dir / "results.jsonl"
         if jsonl.exists():
             with jsonl.open("r", encoding="utf-8") as f:
@@ -128,9 +132,9 @@ def main() -> int:
         "shard_count": shard_count,
         "gpu_ids": gpu_ids,
         "groups": args.groups,
+        "shard_environments": shard_environments,
     }
-    if capability_matrix is None:
-        capability_matrix = {}
+    capability_matrix = _merge_capability_matrices(shard_capability_matrices)
 
     write_json(root_dir / "environment.json", environment)
     write_json(root_dir / "capability_matrix.json", capability_matrix)
@@ -179,6 +183,37 @@ def _visible_gpu_ids(requested: int) -> list[str]:
 
 def _safe_name(value: str) -> str:
     return "".join(ch if ch.isalnum() else "_" for ch in value)
+
+
+def _merge_capability_matrices(matrices: list[dict[str, Any]]) -> dict[str, Any]:
+    if not matrices:
+        return {}
+    merged = copy.deepcopy(matrices[0])
+    merged["parallel_merged"] = True
+    merged["shard_count"] = len(matrices)
+    for key in ("device_api_extension", "curanddx"):
+        rows = [matrix.get(key, {}) for matrix in matrices]
+        if rows:
+            merged[key] = _merge_support_rows(rows)
+    merged["shards"] = [{"shard": index, "capability_matrix": matrix} for index, matrix in enumerate(matrices)]
+    return merged
+
+
+def _merge_support_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    available_values = [bool(row.get("available")) for row in rows]
+    reasons = [
+        str(row.get("unsupported_reason"))
+        for row in rows
+        if row.get("unsupported_reason")
+    ]
+    merged = copy.deepcopy(rows[0]) if rows else {}
+    merged["available"] = bool(available_values) and all(available_values)
+    merged["available_on_any_shard"] = any(available_values)
+    merged["available_on_all_shards"] = bool(available_values) and all(available_values)
+    merged["per_shard"] = rows
+    if not merged["available_on_all_shards"]:
+        merged["unsupported_reason"] = "; ".join(sorted(set(reasons))) or "not available on every shard"
+    return merged
 
 
 if __name__ == "__main__":

@@ -118,12 +118,15 @@ def validate_poisson(out: torch.Tensor, *, n: int, lambda_val: float) -> dict[st
     if sample.numel():
         min_v = float(sample.min().item())
         mean_v = float(sample.mean().item())
+        var_v = float(sample.var(unbiased=False).item()) if sample.numel() > 1 else 0.0
         checks.update(
             {
                 "sample_min": min_v,
                 "sample_mean": mean_v,
+                "sample_variance": var_v,
                 "nonnegative": min_v >= 0,
                 "mean_rough": abs(mean_v - lambda_val) <= max(3.0, 0.50 * lambda_val),
+                "variance_rough": abs(var_v - lambda_val) <= max(5.0, 0.75 * lambda_val),
             }
         )
     return validation_pass(checks)

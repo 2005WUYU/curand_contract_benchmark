@@ -17,7 +17,7 @@ if [[ "${BENCHMARK_GROUPS}" =~ ^[0-9[:space:]]+$ ]]; then
   echo "[h20] ignoring shell GROUPS=${BENCHMARK_GROUPS}; use BENCHMARK_GROUPS or inline GROUPS=all for benchmark task groups" >&2
   BENCHMARK_GROUPS="all"
 fi
-BUILD_DEVICE_EXT="${BUILD_DEVICE_EXT:-0}"
+BUILD_DEVICE_EXT="${BUILD_DEVICE_EXT:-1}"
 ALLOW_DEVICE_EXT_FAILURE="${ALLOW_DEVICE_EXT_FAILURE:-1}"
 
 if [ "${NUM_GPUS}" -gt 1 ]; then

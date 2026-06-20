@@ -47,6 +47,7 @@ def write_csv(path: Path, records: list[dict[str, Any]]) -> None:
         "bytes_per_second",
         "speedup_gpu_vs_baseline",
         "speedup_wall_vs_baseline",
+        "speedup_baseline_formal",
         "formal_result",
         "audit_flags",
     ]
@@ -114,14 +115,14 @@ def write_report(
 
     lines.extend(["", "## Task Results", ""])
     lines.append(
-        "| task | backend | generator | distribution | N | gpu_us | wall_us | speedup_gpu | speedup_wall | validation | audit |"
+        "| task | backend | generator | distribution | N | gpu_us | wall_us | speedup_gpu | speedup_wall | formal | baseline_formal | validation | audit |"
     )
-    lines.append("|---|---|---|---:|---:|---:|---:|---:|---:|---|---|")
+    lines.append("|---|---|---|---:|---:|---:|---:|---:|---:|---|---|---|---|")
     for task_id in sorted(by_task):
         for record in by_task[task_id]:
             validation = record.get("validation", {})
             lines.append(
-                "| {task} | {backend} | {generator} | {distribution} | {n} | {gpu} | {wall} | {sg} | {sw} | {validation} | {audit} |".format(
+                "| {task} | {backend} | {generator} | {distribution} | {n} | {gpu} | {wall} | {sg} | {sw} | {formal} | {baseline_formal} | {validation} | {audit} |".format(
                     task=task_id,
                     backend=record.get("backend"),
                     generator=record.get("generator"),
@@ -131,6 +132,8 @@ def write_report(
                     wall=_fmt(record.get("median_wall_sync_us")),
                     sg=_fmt(record.get("speedup_gpu_vs_baseline")),
                     sw=_fmt(record.get("speedup_wall_vs_baseline")),
+                    formal=record.get("formal_result"),
+                    baseline_formal=record.get("speedup_baseline_formal"),
                     validation=validation.get("status"),
                     audit=",".join(record.get("audit_flags", [])),
                 )
@@ -165,12 +168,19 @@ def _f1_walkthrough(records: list[dict[str, Any]], h20_reference: dict[str, Any]
     f1 = [r for r in records if r["task_id"] == "F1_ADD_UNIFORM"]
     if not f1:
         return ["F1 was not run in this profile."]
-    baselines = [r for r in f1 if r.get("backend") == "curand_host_bulk_plus_consume"]
-    candidates = [r for r in f1 if r.get("backend") == "flagrand_fused_philox"]
+    baselines = [r for r in f1 if r.get("backend") == "curand_host_bulk_plus_consume" and r.get("formal_result")]
+    candidates = [
+        r
+        for r in f1
+        if r.get("backend") == "flagrand_fused_philox"
+        and r.get("formal_result")
+        and r.get("speedup_baseline_formal")
+        and r.get("speedup_wall_vs_baseline") is not None
+    ]
     if not baselines or not candidates:
-        return ["F1 did not include both cuRAND Host bulk+consume and FlagRand fused rows."]
-    base = min(baselines, key=lambda r: r.get("median_wall_sync_us") or float("inf"))
+        return ["F1 did not include both formal cuRAND Host bulk+consume and formal FlagRand fused rows with a formal baseline."]
     cand = min(candidates, key=lambda r: r.get("median_wall_sync_us") or float("inf"))
+    base = next((r for r in baselines if r.get("comparison_key") == cand.get("comparison_key")), baselines[0])
     gpu_speed = cand.get("speedup_gpu_vs_baseline")
     wall_speed = cand.get("speedup_wall_vs_baseline")
     lines = [
@@ -190,6 +200,8 @@ def _f1_walkthrough(records: list[dict[str, Any]], h20_reference: dict[str, Any]
 
 
 def _support_state(row: dict[str, Any]) -> str:
+    if row.get("available_on_any_shard") and not row.get("available_on_all_shards"):
+        return "partial"
     return "available" if row.get("available") else "unsupported"
 
 
@@ -200,4 +212,3 @@ def _fmt(value: Any) -> str:
         return f"{float(value):.3f}"
     except (TypeError, ValueError):
         return str(value)
-
