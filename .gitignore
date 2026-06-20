@@ -1,0 +1,28 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Benchmark outputs
+results/
+
+# Native extension build outputs
+native/build/
+*.pyd
+*.so
+*.dll
+*.lib
+*.exp
+*.obj
+*.o
+
+# Local/editor noise
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.idea/
+.vscode/
+
+# OS files
+Thumbs.db
+.DS_Store
