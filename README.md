@@ -60,7 +60,13 @@ SLURM_PARTITION=long TIME_LIMIT=08:00:00 PROFILE=h20 GROUPS=stage2,stage3,stage4
 SLURM_PARTITION=long TIME_LIMIT=08:00:00 PROFILE=h20 GROUPS=all BUILD_DEVICE_EXT=1 bash scripts/h20_benchmark.sh
 ```
 
-这些脚本外层使用 `srun --gres=gpu:<N>`，内层使用 `flagtree-nvidia:3.6-v2`，镜像缺失时会尝试从 `/data/nfs3/flagtree-nvidia-3.6-v2.tar` 加载。
+多卡并行全跑：
+
+```bash
+NUM_GPUS=4 SLURM_PARTITION=long TIME_LIMIT=08:00:00 PROFILE=h20 GROUPS=all BUILD_DEVICE_EXT=1 bash scripts/h20_benchmark.sh
+```
+
+这些脚本外层使用 `srun --gres=gpu:<N>`，内层使用 `flagtree-nvidia:3.6-v2`，镜像缺失时会尝试从 `/data/nfs3/flagtree-nvidia-3.6-v2.tar` 加载。`NUM_GPUS>1` 时会按 task 分片并行跑，然后合并 `results.jsonl`、`results.csv` 和 `REPORT.md`。
 
 ## 输出结构
 

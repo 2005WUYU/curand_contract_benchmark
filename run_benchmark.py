@@ -42,6 +42,7 @@ def parse_args() -> argparse.Namespace:
         help="Comma-separated task ids, families, stage0..stage4, or all.",
     )
     parser.add_argument("--results-dir", type=Path, default=BENCHMARK_ROOT / "results")
+    parser.add_argument("--run-dir", type=Path, default=None, help="Exact output directory. Intended for sharded/parallel launchers.")
     parser.add_argument("--list-tasks", action="store_true")
     parser.add_argument("--h20-reference", type=Path, default=REPO_ROOT / "20260615-185511-h20-full-fast")
     return parser.parse_args()
@@ -63,7 +64,11 @@ def main() -> int:
     selected_specs = specs_for_groups(groups or {"all"})
     selected_map = {spec.task_id: spec for spec in selected_specs}
 
-    results_dir = make_run_dir(args.results_dir, args.profile)
+    if args.run_dir is not None:
+        results_dir = args.run_dir
+        results_dir.mkdir(parents=True, exist_ok=False)
+    else:
+        results_dir = make_run_dir(args.results_dir, args.profile)
     print(f"[contract-benchmark] results: {results_dir}")
     print(f"[contract-benchmark] profile={args.profile} tasks={len(selected_specs)}")
 

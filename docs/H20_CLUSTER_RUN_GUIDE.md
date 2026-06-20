@@ -167,6 +167,32 @@ BUILD_DEVICE_EXT=1 \
 bash scripts/h20_benchmark.sh
 ```
 
+如果要多占几张 GPU 并行切分任务，加 `NUM_GPUS`。例如 4 卡全量：
+
+```bash
+NUM_GPUS=4 \
+SLURM_PARTITION=long \
+TIME_LIMIT=08:00:00 \
+PROFILE=h20 \
+GROUPS=all \
+BUILD_DEVICE_EXT=1 \
+bash scripts/h20_benchmark.sh
+```
+
+`NUM_GPUS=1` 时输出普通单进程目录；`NUM_GPUS>1` 时脚本会在容器内按 task 分片，每张 GPU 一个进程，最后合并到：
+
+```text
+results/<timestamp>_h20_parallel_<N>gpu/
+  parallel_manifest.json
+  shard_*.log
+  shard_*_gpu_*/
+  results.jsonl
+  results.csv
+  REPORT.md
+```
+
+注意：不要只在 Slurm 层多申请 GPU 却仍单进程跑，那只会多占卡不会变快。本脚本在 `NUM_GPUS>1` 时会自动并行分片。
+
 ### 5.3 可调参数
 
 脚本支持这些环境变量：
@@ -180,7 +206,7 @@ MEM_PER_GPU_MB    smoke 默认 32768，benchmark 默认 242144
 IMAGE             默认 flagtree-nvidia:3.6-v2
 IMAGE_TAR         默认 /data/nfs3/flagtree-nvidia-3.6-v2.tar
 PROFILE           默认 h20
-GROUPS            默认 all
+GROUPS            默认 all；也支持 BENCHMARK_GROUPS，避免和 Bash 特殊变量重名
 BUILD_DEVICE_EXT  1 表示先尝试构建 native cuRAND Device API extension
 ```
 

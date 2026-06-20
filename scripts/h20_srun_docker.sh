@@ -27,6 +27,12 @@ NUM_MEM_MB=$((NUM_GPUS * MEM_PER_GPU_MB))
 echo "[h20] partition=${SLURM_PARTITION} gpus=${NUM_GPUS} cpus=${NUM_CPUS} mem=${NUM_MEM_MB}M time=${TIME_LIMIT}"
 echo "[h20] image=${IMAGE}"
 echo "[h20] repo=${REPO_ROOT}"
+echo "[h20] inner_cmd=${INNER_CMD}"
+
+if [ "${DRY_RUN:-0}" = "1" ]; then
+  echo "[h20] DRY_RUN=1; not submitting srun"
+  exit 0
+fi
 
 srun -p "${SLURM_PARTITION}" \
   --job-name="${JOB_NAME}" \

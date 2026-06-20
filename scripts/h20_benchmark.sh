@@ -11,11 +11,20 @@ export TIME_LIMIT="${TIME_LIMIT:-08:00:00}"
 export JOB_NAME="${JOB_NAME:-curand-h20-benchmark}"
 
 PROFILE="${PROFILE:-h20}"
-GROUPS="${GROUPS:-all}"
+GROUPS_FROM_ENV="$(printenv GROUPS || true)"
+BENCHMARK_GROUPS="${BENCHMARK_GROUPS:-${GROUPS_FROM_ENV:-all}}"
+if [[ "${BENCHMARK_GROUPS}" =~ ^[0-9[:space:]]+$ ]]; then
+  echo "[h20] ignoring shell GROUPS=${BENCHMARK_GROUPS}; use BENCHMARK_GROUPS or inline GROUPS=all for benchmark task groups" >&2
+  BENCHMARK_GROUPS="all"
+fi
 BUILD_DEVICE_EXT="${BUILD_DEVICE_EXT:-0}"
 ALLOW_DEVICE_EXT_FAILURE="${ALLOW_DEVICE_EXT_FAILURE:-1}"
 
-CMD="python run_benchmark.py --profile ${PROFILE} --groups ${GROUPS}"
+if [ "${NUM_GPUS}" -gt 1 ]; then
+  CMD="python scripts/h20_parallel_benchmark.py --profile ${PROFILE} --groups ${BENCHMARK_GROUPS} --num-gpus ${NUM_GPUS}"
+else
+  CMD="python run_benchmark.py --profile ${PROFILE} --groups ${BENCHMARK_GROUPS}"
+fi
 
 if [ "${BUILD_DEVICE_EXT}" = "1" ]; then
   if [ "${ALLOW_DEVICE_EXT_FAILURE}" = "1" ]; then

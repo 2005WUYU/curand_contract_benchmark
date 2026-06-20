@@ -242,6 +242,8 @@ SLURM_PARTITION=debug TIME_LIMIT=01:00:00 PROFILE=h20 GROUPS=stage0,stage1 BUILD
 SLURM_PARTITION=long TIME_LIMIT=08:00:00 PROFILE=h20 GROUPS=stage2,stage3,stage4 BUILD_DEVICE_EXT=1 bash scripts/h20_benchmark.sh
 ```
 
+全量任务可以使用 `GROUPS=all`；如需多 GPU 加速，设置 `NUM_GPUS>1`，脚本会按 task 分片并在最终目录合并结果。
+
 正式报告应优先回答：
 
 - `H0` raw bulk 是否仍落后。
