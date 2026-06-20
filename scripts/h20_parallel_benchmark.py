@@ -18,6 +18,7 @@ for path in (REPO_ROOT, REPO_ROOT / "src"):
         sys.path.insert(0, text)
 
 from contract_benchmark.reporting import write_csv, write_json, write_jsonl, write_report, write_task_registry  # noqa: E402
+from contract_benchmark.runner import finalize_records  # noqa: E402
 from contract_benchmark.spec import specs_for_groups  # noqa: E402
 
 
@@ -135,6 +136,7 @@ def main() -> int:
         "shard_environments": shard_environments,
     }
     capability_matrix = _merge_capability_matrices(shard_capability_matrices)
+    finalize_records(records)
 
     write_json(root_dir / "environment.json", environment)
     write_json(root_dir / "capability_matrix.json", capability_matrix)

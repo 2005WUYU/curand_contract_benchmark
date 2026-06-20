@@ -49,6 +49,7 @@ def write_csv(path: Path, records: list[dict[str, Any]]) -> None:
         "speedup_wall_vs_baseline",
         "speedup_baseline_formal",
         "formal_result",
+        "cross_record_gate_failures",
         "audit_flags",
     ]
     with path.open("w", encoding="utf-8", newline="") as f:
@@ -60,6 +61,7 @@ def write_csv(path: Path, records: list[dict[str, Any]]) -> None:
             row["validation_status"] = validation.get("status")
             row["unsupported_reason"] = validation.get("unsupported_reason")
             row["parameters"] = json.dumps(record.get("parameters", {}), ensure_ascii=False, sort_keys=True)
+            row["cross_record_gate_failures"] = json.dumps(record.get("cross_record_gate_failures", []), ensure_ascii=False)
             row["audit_flags"] = json.dumps(record.get("audit_flags", []), ensure_ascii=False)
             writer.writerow(row)
 

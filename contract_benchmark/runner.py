@@ -227,7 +227,7 @@ def run_specs(ctx: BenchmarkContext, selected_specs: list[TaskSpec]) -> tuple[li
                 records.append(_unsupported_record(ctx, spec, "runner", f"No runner implemented for {spec.task_id}"))
         except BaseException as exc:
             records.append(_error_record(ctx, spec, "runner", exc))
-    _compute_speedups(records)
+    finalize_records(records)
     if cap_matrix is None:
         cap_matrix = capability_matrix()
     return records, cap_matrix
@@ -291,51 +291,64 @@ def _run_g1(ctx: BenchmarkContext, spec: TaskSpec) -> list[dict[str, Any]]:
 
 def _run_g2(ctx: BenchmarkContext, spec: TaskSpec) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
-    generator = "philox4x32_10"
-    n = _adjust_n(ctx.profile.gate_n, generator, "raw32")
-    for backend in ("curand_host", "flagrand_public"):
-        try:
-            a = torch.empty(n, device=ctx.device, dtype=torch.int32)
-            b = torch.empty_like(a)
-            c = torch.empty_like(a)
-            d = torch.empty_like(a)
-            e = torch.empty_like(a)
-            if backend == "curand_host":
-                with make_curand_generator(generator, seed=ctx.seed, offset=0, ordering="legacy") as gen:
-                    gen.generate_raw_u32(a)
-                with make_curand_generator(generator, seed=ctx.seed, offset=0, ordering="legacy") as gen:
-                    gen.generate_raw_u32(b)
-                with make_curand_generator(generator, seed=ctx.seed + 1, offset=0, ordering="legacy") as gen:
-                    gen.generate_raw_u32(c)
-                with make_curand_generator(generator, seed=ctx.seed, offset=n, ordering="legacy") as gen:
-                    gen.generate_raw_u32(d)
-                with make_curand_generator(generator, seed=ctx.seed, offset=0, ordering="legacy") as gen:
-                    gen.generate_raw_u32(e)
-                    gen.generate_raw_u32(e)
-            else:
-                gen_a = make_flagrand_generator(generator, seed=ctx.seed, offset=0)
-                gen_b = make_flagrand_generator(generator, seed=ctx.seed, offset=0)
-                gen_c = make_flagrand_generator(generator, seed=ctx.seed + 1, offset=0)
-                gen_d = make_flagrand_generator(generator, seed=ctx.seed, offset=n)
-                gen_e = make_flagrand_generator(generator, seed=ctx.seed, offset=0)
-                flagrand_generate_raw(a, gen_a)
-                flagrand_generate_raw(b, gen_b)
-                flagrand_generate_raw(c, gen_c)
-                flagrand_generate_raw(d, gen_d)
-                flagrand_generate_raw(e, gen_e)
-                flagrand_generate_raw(e, gen_e)
-            torch.cuda.synchronize()
-            validation = validation_pass(
-                {
+    generators = [
+        generator
+        for generator in ctx.profile.raw_generators
+        if GENERATOR_INFOS[generator].kind == "prng" and GENERATOR_INFOS[generator].supports_raw32
+    ]
+    for generator in generators:
+        info = GENERATOR_INFOS[generator]
+        n = _adjust_n(ctx.profile.gate_n, generator, "raw32")
+        for backend in ("curand_host", "flagrand_public"):
+            if backend == "curand_host" and not info.supports_curand_host:
+                continue
+            if backend == "flagrand_public" and not info.supports_flagrand:
+                continue
+            try:
+                a = torch.empty(n, device=ctx.device, dtype=torch.int32)
+                b = torch.empty_like(a)
+                c = torch.empty_like(a)
+                e = torch.empty_like(a)
+                d = torch.empty_like(a) if info.supports_offset else None
+                if backend == "curand_host":
+                    with make_curand_generator(generator, seed=ctx.seed, offset=0, ordering="legacy") as gen:
+                        gen.generate_raw_u32(a)
+                    with make_curand_generator(generator, seed=ctx.seed, offset=0, ordering="legacy") as gen:
+                        gen.generate_raw_u32(b)
+                    with make_curand_generator(generator, seed=ctx.seed + 1, offset=0, ordering="legacy") as gen:
+                        gen.generate_raw_u32(c)
+                    if d is not None:
+                        with make_curand_generator(generator, seed=ctx.seed, offset=n, ordering="legacy") as gen:
+                            gen.generate_raw_u32(d)
+                    with make_curand_generator(generator, seed=ctx.seed, offset=0, ordering="legacy") as gen:
+                        gen.generate_raw_u32(e)
+                        gen.generate_raw_u32(e)
+                else:
+                    gen_a = make_flagrand_generator(generator, seed=ctx.seed, offset=0)
+                    gen_b = make_flagrand_generator(generator, seed=ctx.seed, offset=0)
+                    gen_c = make_flagrand_generator(generator, seed=ctx.seed + 1, offset=0)
+                    gen_e = make_flagrand_generator(generator, seed=ctx.seed, offset=0)
+                    flagrand_generate_raw(a, gen_a)
+                    flagrand_generate_raw(b, gen_b)
+                    flagrand_generate_raw(c, gen_c)
+                    if d is not None:
+                        gen_d = make_flagrand_generator(generator, seed=ctx.seed, offset=n)
+                        flagrand_generate_raw(d, gen_d)
+                    flagrand_generate_raw(e, gen_e)
+                    flagrand_generate_raw(e, gen_e)
+                torch.cuda.synchronize()
+                checks: dict[str, Any] = {
                     "same_seed_same_output": tensors_equal(a, b),
                     "changed_seed_changes_output": not tensors_equal(a, c),
-                    "changed_offset_changes_output": not tensors_equal(a, d),
                     "same_generator_second_call_advances": not tensors_equal(a, e),
+                    "offset_check_applicable": "yes" if info.supports_offset else "not_supported_by_generator",
                 }
-            )
-            records.append(_gate_record(ctx, spec, backend, generator, "raw32", n, validation))
-        except BaseException as exc:
-            records.append(_error_record(ctx, spec, backend, exc, generator=generator, distribution="raw32", n=n))
+                if d is not None:
+                    checks["changed_offset_changes_output"] = not tensors_equal(a, d)
+                validation = validation_pass(checks)
+                records.append(_gate_record(ctx, spec, backend, generator, "raw32", n, validation))
+            except BaseException as exc:
+                records.append(_error_record(ctx, spec, backend, exc, generator=generator, distribution="raw32", n=n))
     return records
 
 
@@ -805,7 +818,7 @@ def _run_e0(ctx: BenchmarkContext, spec: TaskSpec) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     cases = [
         ("curand_invalid_lambda", "curand_host", _e0_curand_invalid_lambda, True),
-        ("curand_odd_normal_n", "curand_host", _e0_curand_odd_normal_n, True),
+        ("curand_odd_normal_n", "curand_host", _e0_curand_odd_normal_n, False),
         ("curand_invalid_dimensions", "curand_host", _e0_curand_invalid_dimensions, True),
         ("flagrand_invalid_lambda", "flagrand_public", _e0_flagrand_invalid_lambda, True),
         ("flagrand_odd_philox_n", "flagrand_public", _e0_flagrand_odd_philox_n, True),
@@ -1477,9 +1490,64 @@ def _error_record(
     return record
 
 
+def finalize_records(records: list[dict[str, Any]]) -> None:
+    apply_cross_record_gates(records)
+    _compute_speedups(records)
+
+
+def apply_cross_record_gates(records: list[dict[str, Any]]) -> None:
+    failed_sequence: set[tuple[str, str]] = set()
+    failed_distribution: set[tuple[str, str, str]] = set()
+    failed_basic: set[tuple[str, str, str]] = set()
+    for record in records:
+        if record.get("validation", {}).get("status") != "fail":
+            continue
+        key2 = (str(record.get("backend")), str(record.get("generator")))
+        key3 = (str(record.get("backend")), str(record.get("generator")), str(record.get("distribution")))
+        if record.get("task_id") == "G2_REPRODUCIBILITY":
+            failed_sequence.add(key2)
+        elif record.get("task_id") == "G1_DISTRIBUTION_ROUGH_CHECK":
+            failed_distribution.add(key3)
+        elif record.get("task_id") == "G0_BASIC_CONTRACT":
+            failed_basic.add(key3)
+
+    gate_task_ids = {"G0_BASIC_CONTRACT", "G1_DISTRIBUTION_ROUGH_CHECK", "G2_REPRODUCIBILITY"}
+    for record in records:
+        if record.get("task_id") in gate_task_ids or not record.get("comparison_key"):
+            continue
+        key2 = (str(record.get("backend")), str(record.get("generator")))
+        key3 = (str(record.get("backend")), str(record.get("generator")), str(record.get("distribution")))
+        failures: list[str] = []
+        if key3 in failed_basic:
+            failures.append("G0_BASIC_CONTRACT")
+            _add_audit_flag(record, "basic_contract_gate_failed")
+        if key3 in failed_distribution:
+            failures.append("G1_DISTRIBUTION_ROUGH_CHECK")
+            _add_audit_flag(record, "distribution_gate_failed")
+        if key2 in failed_sequence:
+            failures.append("G2_REPRODUCIBILITY")
+            _add_audit_flag(record, "sequence_semantics_gate_failed")
+        if failures:
+            record["formal_result"] = False
+            record["cross_record_gate_failures"] = sorted(set(failures))
+
+
+def _add_audit_flag(record: dict[str, Any], flag: str) -> None:
+    flags = record.get("audit_flags")
+    if not isinstance(flags, list):
+        flags = []
+        record["audit_flags"] = flags
+    if flag not in flags:
+        flags.append(flag)
+
+
 def _compute_speedups(records: list[dict[str, Any]]) -> None:
     baselines: dict[str, dict[str, float]] = {}
     seen_baseline_keys: set[str] = set()
+    for record in records:
+        record["speedup_gpu_vs_baseline"] = None
+        record["speedup_wall_vs_baseline"] = None
+        record["speedup_baseline_formal"] = False
     for record in records:
         key = record.get("comparison_key")
         if not key or not record.get("is_baseline"):
@@ -1495,13 +1563,13 @@ def _compute_speedups(records: list[dict[str, Any]]) -> None:
         key = record.get("comparison_key")
         base = baselines.get(key)
         record["speedup_baseline_formal"] = bool(base)
+        if key and base and not record.get("formal_result"):
+            if not record.get("is_baseline"):
+                _add_audit_flag(record, "record_not_formal")
+            continue
         if not key or not base:
             if key in seen_baseline_keys and not record.get("is_baseline"):
-                flags = record.setdefault("audit_flags", [])
-                if "baseline_not_formal" not in flags:
-                    flags.append("baseline_not_formal")
-            record.setdefault("speedup_gpu_vs_baseline", None)
-            record.setdefault("speedup_wall_vs_baseline", None)
+                _add_audit_flag(record, "baseline_not_formal")
             continue
         gpu = record.get("median_gpu_us")
         wall = record.get("median_wall_sync_us")

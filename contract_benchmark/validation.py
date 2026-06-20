@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import torch
@@ -119,14 +120,23 @@ def validate_poisson(out: torch.Tensor, *, n: int, lambda_val: float) -> dict[st
         min_v = float(sample.min().item())
         mean_v = float(sample.mean().item())
         var_v = float(sample.var(unbiased=False).item()) if sample.numel() > 1 else 0.0
+        sample_n = int(sample.numel())
+        # This is still a rough performance gate, not a randomness proof. The
+        # tolerance scales with sampling noise so small-lambda Poisson does not
+        # get a blanket pass from a fixed absolute threshold.
+        mean_tolerance = max(0.05 * max(lambda_val, 1.0), 6.0 * math.sqrt(max(lambda_val, 1e-12) / sample_n))
+        variance_tolerance = max(0.20 * max(lambda_val, 0.5), 8.0 * max(lambda_val, 1e-12) * math.sqrt(2.0 / max(sample_n - 1, 1)))
         checks.update(
             {
                 "sample_min": min_v,
                 "sample_mean": mean_v,
                 "sample_variance": var_v,
+                "sample_n": sample_n,
+                "mean_tolerance": mean_tolerance,
+                "variance_tolerance": variance_tolerance,
                 "nonnegative": min_v >= 0,
-                "mean_rough": abs(mean_v - lambda_val) <= max(3.0, 0.50 * lambda_val),
-                "variance_rough": abs(var_v - lambda_val) <= max(5.0, 0.75 * lambda_val),
+                "mean_rough": abs(mean_v - lambda_val) <= mean_tolerance,
+                "variance_rough": abs(var_v - lambda_val) <= variance_tolerance,
             }
         )
     return validation_pass(checks)
