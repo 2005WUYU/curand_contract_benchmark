@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "curand-contract-benchmark"
+version = "0.1.0"
+description = "Contract-style FlagRand vs NVIDIA cuRAND benchmark with bundled FlagRand source."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.1.0,<3",
+    "triton",
+    "PyYAML>=6.0",
+]
+
+[tool.setuptools.packages.find]
+where = [".", "src"]
+include = ["contract_benchmark*", "flagrand*"]
+
+[tool.setuptools.package-data]
+"flagrand.rng" = ["data/*.pt"]

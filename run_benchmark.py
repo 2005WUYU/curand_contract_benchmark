@@ -9,10 +9,11 @@ import torch
 
 BENCHMARK_ROOT = Path(__file__).resolve().parent
 REPO_ROOT = BENCHMARK_ROOT.parent
-SRC_ROOT = REPO_ROOT / "src"
-for path in (BENCHMARK_ROOT, SRC_ROOT):
+LOCAL_SRC_ROOT = BENCHMARK_ROOT / "src"
+PARENT_SRC_ROOT = REPO_ROOT / "src"
+for path in (BENCHMARK_ROOT, LOCAL_SRC_ROOT, PARENT_SRC_ROOT):
     text = str(path)
-    if text not in sys.path:
+    if path.exists() and text not in sys.path:
         sys.path.insert(0, text)
 
 from contract_benchmark.reporting import (  # noqa: E402
@@ -119,4 +120,3 @@ def _load_h20_reference(path: Path) -> dict[str, str] | None:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
