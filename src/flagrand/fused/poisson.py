@@ -19,13 +19,26 @@ _64BIT_GENERATORS = {GENERATOR_SOBOL64, GENERATOR_SCRAMBLED_SOBOL64}
 
 
 @triton.jit
-def _poisson_transform_kernel_small_32(out_ptr, raw_ptr, n, lambda_val, BLOCK: tl.constexpr):
+def _poisson_inverse_from_uniform(u, lambda_val, MAX_K: tl.constexpr):
+    p = tl.exp(-lambda_val)
+    cdf = p
+    k = tl.zeros_like(u, dtype=tl.int32)
+    for i in range(1, MAX_K + 1):
+        active = u > cdf
+        p = p * lambda_val / i
+        cdf += p
+        k = tl.where(active, i, k)
+    return k
+
+
+@triton.jit
+def _poisson_transform_kernel_small_32(out_ptr, raw_ptr, n, lambda_val, BLOCK: tl.constexpr, MAX_K: tl.constexpr):
     pid = tl.program_id(0)
     offs = pid * BLOCK + tl.arange(0, BLOCK)
     mask = offs < n
     x = tl.load(raw_ptr + offs, mask=mask, other=0)
     u = uint32_to_uniform(x)
-    k = tl.floor(-tl.log(tl.maximum(u, 1e-7)) * lambda_val + 0.5)
+    k = _poisson_inverse_from_uniform(u, lambda_val, MAX_K)
     tl.store(out_ptr + offs, k.to(tl.int32), mask=mask)
 
 
@@ -47,13 +60,13 @@ def _poisson_transform_kernel_large_32(out_ptr, raw_ptr, n, lambda_val, BLOCK: t
 
 
 @triton.jit
-def _poisson_transform_kernel_small_64(out_ptr, raw_ptr, n, lambda_val, BLOCK: tl.constexpr):
+def _poisson_transform_kernel_small_64(out_ptr, raw_ptr, n, lambda_val, BLOCK: tl.constexpr, MAX_K: tl.constexpr):
     pid = tl.program_id(0)
     offs = pid * BLOCK + tl.arange(0, BLOCK)
     mask = offs < n
     x = tl.load(raw_ptr + offs, mask=mask, other=0)
     u = uint64_to_uniform64(x)
-    k = tl.floor(-tl.log(tl.maximum(u, 1e-7)) * lambda_val + 0.5)
+    k = _poisson_inverse_from_uniform(u, lambda_val, MAX_K)
     tl.store(out_ptr + offs, k.to(tl.int64), mask=mask)
 
 
@@ -112,6 +125,10 @@ def generate_poisson(
                 f"generate_poisson: Philox requires element count to be "
                 f"a multiple of 4, got {n}."
             )
+    if lambda_val >= 30.0 and n % 2:
+        raise ValueError(
+            f"generate_poisson: lambda >= 30 currently requires an even element count, got {n}."
+        )
 
     if is_64:
         raw = _generate_raw64(generator, out.shape, out.device)
@@ -120,7 +137,7 @@ def generate_poisson(
             _poisson_transform_kernel_small_64[grid](
                 out.view(-1), raw.view(-1), n,
                 lambda_val,
-                BLOCK=block_size, num_warps=num_warps,
+                BLOCK=block_size, MAX_K=192, num_warps=num_warps,
             )
         else:
             n_pairs = n // 2
@@ -137,7 +154,7 @@ def generate_poisson(
             _poisson_transform_kernel_small_32[grid](
                 out.view(-1), raw.view(-1), n,
                 lambda_val,
-                BLOCK=block_size, num_warps=num_warps,
+                BLOCK=block_size, MAX_K=192, num_warps=num_warps,
             )
         else:
             n_pairs = n // 2

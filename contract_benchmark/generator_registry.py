@@ -50,8 +50,8 @@ GENERATOR_INFOS: dict[str, GeneratorInfo] = {
         False,
         True,
         True,
-        True,
-        [],
+        False,
+        ["FlagRand XORWOW advances consecutive calls, but offset is a stream-key perturbation rather than cuRAND-compatible skip-ahead."],
     ),
     "mrg32k3a": GeneratorInfo(
         "mrg32k3a",
@@ -65,8 +65,8 @@ GENERATOR_INFOS: dict[str, GeneratorInfo] = {
         False,
         True,
         True,
-        True,
-        [],
+        False,
+        ["FlagRand MRG32K3A advances consecutive calls, but offset is a stream-key perturbation rather than matrix skip-ahead."],
     ),
     "mtgp32": GeneratorInfo(
         "mtgp32",

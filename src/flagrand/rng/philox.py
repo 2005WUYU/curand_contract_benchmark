@@ -19,11 +19,11 @@ def _philox_generate(seed, counter):
 
 
 @triton.jit
-def _philox_kernel(out_ptr, seed, n, BLOCK: tl.constexpr):
+def _philox_kernel(out_ptr, seed, base_counter, n, BLOCK: tl.constexpr):
     pid = tl.program_id(0)
     offs = pid * BLOCK + tl.arange(0, BLOCK)
     mask = offs < n
-    counter = offs
+    counter = base_counter + offs
     r0, r1, r2, r3 = _philox_generate(seed, counter)
     # Build a (BLOCK, 4) tile and store with one 2D op so the compiler can
     # emit 16-byte vector stores (4 contiguous uint32 per counter).
@@ -61,13 +61,27 @@ class PhiloxGenerator:
                 f"Philox: element count must be a multiple of 4, got {n}."
             )
 
+        seed_val = self.seed if seed is None else int(seed)
+        offset_val = self.offset if offset is None else int(offset)
+        if offset_val < 0:
+            raise ValueError(f"Philox: offset must be >= 0, got {offset_val}.")
+        if offset_val % 4 != 0:
+            raise ValueError(
+                f"Philox: offset is measured in uint32 outputs and must be "
+                f"a multiple of 4 for vectorized Philox4, got {offset_val}."
+            )
+
         n_counters = n // 4
+        base_counter = offset_val // 4
         grid = (triton.cdiv(n_counters, block_size),)
         _philox_kernel[grid](
             out.view(-1),
-            self.seed,
+            seed_val,
+            base_counter,
             n_counters,
             BLOCK=block_size,
             num_warps=num_warps,
         )
+        if seed is None and offset is None:
+            self.offset = offset_val + n
         return out

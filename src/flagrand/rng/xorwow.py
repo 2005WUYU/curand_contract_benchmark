@@ -100,8 +100,13 @@ class XorwowGenerator:
         num_iters = (n + n_threads - 1) // n_threads
         grid = ((n_threads + _BLOCK - 1) // _BLOCK,)
 
-        seed_lo = self.seed & 0xFFFFFFFF
-        seed_hi = (self.seed >> 32) & 0xFFFFFFFF
+        seed_val = self.seed if seed is None else int(seed)
+        offset_val = self.offset if offset is None else int(offset)
+        if offset_val < 0:
+            raise ValueError(f"XORWOW: offset must be >= 0, got {offset_val}.")
+
+        seed_lo = seed_val & 0xFFFFFFFF
+        seed_hi = (seed_val >> 32) & 0xFFFFFFFF
 
         out_u32 = out.view(-1).view(torch.uint32)
 
@@ -109,11 +114,13 @@ class XorwowGenerator:
             out_u32,
             seed_lo,
             seed_hi,
-            self.offset & 0xFFFFFFFF,
+            offset_val & 0xFFFFFFFF,
             n,
             n_threads,
             num_iters,
             BLOCK=_BLOCK,
             num_warps=8,
         )
+        if seed is None and offset is None:
+            self.offset = offset_val + n
         return out

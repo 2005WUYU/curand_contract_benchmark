@@ -113,16 +113,23 @@ class Mrg32k3aGenerator:
         num_iters = (n + n_threads - 1) // n_threads
         grid = ((n_threads + _BLOCK - 1) // _BLOCK,)
 
-        seed_u32 = self.seed & 0xFFFFFFFF
+        seed_val = self.seed if seed is None else int(seed)
+        offset_val = self.offset if offset is None else int(offset)
+        if offset_val < 0:
+            raise ValueError(f"MRG32K3A: offset must be >= 0, got {offset_val}.")
+
+        seed_u32 = seed_val & 0xFFFFFFFF
 
         _mrg32k3a_kernel[grid](
             out.view(-1),
             seed_u32,
-            self.offset & 0xFFFFFFFF,
+            offset_val & 0xFFFFFFFF,
             n,
             n_threads,
             num_iters,
             BLOCK=_BLOCK,
             num_warps=4,
         )
+        if seed is None and offset is None:
+            self.offset = offset_val + n
         return out

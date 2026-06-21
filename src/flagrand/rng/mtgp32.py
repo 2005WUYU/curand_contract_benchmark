@@ -10,7 +10,7 @@ import triton.language as tl
 
 _params = torch.load(str(Path(__file__).parent / "data" / "mtgp32_params.pt"), map_location="cpu")
 
-_MTGP32_BLOCK_SIZE = 512
+_MTGP32_BLOCK_SIZE = 256
 _MTGP32_MAX_BLOCKS = 192
 _MTGPDC_N = 351
 _MTGP32_STATE_SIZE = 1024
@@ -22,11 +22,8 @@ def _u32_to_int32(buf: torch.Tensor) -> torch.Tensor:
     return torch.where(buf >= 0x80000000, buf - 0x100000000, buf).to(torch.int32)
 
 
-# ==================== __device__ computation functions ====================
-
 @triton.jit
 def _mtgp32_recurrence(X1, X2, Y, sh1, sh2, MASK):
-    """MTGP32 recurrence step: pure computation, no memory access."""
     X = (X1 & MASK) ^ X2
     X = X ^ ((X << sh1) & 0xFFFFFFFF)
     return X ^ (Y >> sh2)
@@ -34,13 +31,10 @@ def _mtgp32_recurrence(X1, X2, Y, sh1, sh2, MASK):
 
 @triton.jit
 def _mtgp32_temper(r, T):
-    """MTGP32 tempering step: pure computation, no memory access."""
     T = T ^ (T >> 16)
     T = T ^ (T >> 8)
     return r ^ T
 
-
-# ==================== Triton kernel ====================
 
 @triton.jit
 def _mtgp32_kernel(
@@ -93,8 +87,6 @@ def _mtgp32_kernel(
         tl.debug_barrier()
 
 
-# ==================== State management ====================
-
 def _mtgp32_init_state_cpu(bid: int, state_seed: int) -> list[int]:
     hidden_seed = int(_params["hidden_seeds"][bid % 200].item())
 
@@ -129,9 +121,7 @@ def _build_initial_state(seed: int, device_str: str) -> torch.Tensor:
 
 
 @lru_cache(maxsize=4)
-def _build_param_tensors(
-    device_str: str,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+def _build_param_tensors(device_str: str) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     device = torch.device(device_str)
     pos = _params["pos"][:_MTGP32_MAX_BLOCKS].to(device=device)
     sh1 = _params["sh1"][:_MTGP32_MAX_BLOCKS].to(device=device)
@@ -140,8 +130,6 @@ def _build_param_tensors(
     temper = _u32_to_int32(_params["temper"][: _MTGP32_MAX_BLOCKS * 16]).to(device=device)
     return pos, sh1, sh2, param, temper
 
-
-# ==================== Generator class ====================
 
 @dataclass
 class Mtgp32Generator:
@@ -160,11 +148,13 @@ class Mtgp32Generator:
         offset: int | None = None,
         **kwargs: object,
     ) -> torch.Tensor:
-        if self.offset != 0:
-            raise ValueError(
-                f"MTGP32 does not support non-zero offset, got {self.offset}."
-            )
-        block_size = kwargs.get("block_size", _MTGP32_BLOCK_SIZE)
+        offset_val = self.offset if offset is None else int(offset)
+        if offset_val != 0:
+            raise ValueError(f"MTGP32 does not support non-zero offset, got {offset_val}.")
+        seed_val = self.seed if seed is None else int(seed)
+        block_size = int(kwargs.get("block_size", _MTGP32_BLOCK_SIZE))
+        if block_size != _MTGP32_BLOCK_SIZE:
+            raise ValueError("MTGP32 uses a fixed block_size=256 to preserve per-state dependency ordering.")
         num_warps = kwargs.get("num_warps", 8)
 
         n = out.numel()
@@ -175,17 +165,14 @@ class Mtgp32Generator:
         n_blocks = min(_MTGP32_MAX_BLOCKS, blocks_needed)
         num_iters = (blocks_needed + n_blocks - 1) // n_blocks
 
-        # Per-instance working state buffer. The kernel mutates state in place,
-        # so we initialize it on the first call (or when seed/device/shape
-        # changes) and let subsequent calls advance the stream — this matches
-        # the cuRAND semantics and avoids a 13us D2D copy on every call.
+        # Mutated in place so subsequent calls advance the stream.
         ws_seed = getattr(self, "_ws_seed", None)
         ws_device = getattr(self, "_ws_device", None)
         ws_blocks = getattr(self, "_ws_blocks", 0)
-        if ws_seed != self.seed or ws_device != device_str or ws_blocks < n_blocks:
-            initial_state = _build_initial_state(self.seed, device_str)
+        if ws_seed != seed_val or ws_device != device_str or ws_blocks < n_blocks:
+            initial_state = _build_initial_state(seed_val, device_str)
             self._working_state = initial_state.clone()
-            self._ws_seed = self.seed
+            self._ws_seed = seed_val
             self._ws_device = device_str
             self._ws_blocks = self._working_state.shape[0]
         state = self._working_state[:n_blocks]

@@ -87,7 +87,9 @@ def run_g2(ctx: BenchmarkContext, spec: TaskSpec) -> list[dict[str, Any]]:
                 a = torch.empty(n, device=ctx.device, dtype=torch.int32)
                 b = torch.empty_like(a)
                 c = torch.empty_like(a)
-                e = torch.empty_like(a)
+                first = torch.empty_like(a)
+                second = torch.empty_like(a)
+                full = torch.empty(n * 2, device=ctx.device, dtype=torch.int32)
                 d = torch.empty_like(a) if info.supports_offset else None
                 if backend == "curand_host":
                     with make_curand_generator(generator, seed=ctx.seed, offset=0, ordering="legacy") as gen:
@@ -100,26 +102,32 @@ def run_g2(ctx: BenchmarkContext, spec: TaskSpec) -> list[dict[str, Any]]:
                         with make_curand_generator(generator, seed=ctx.seed, offset=n, ordering="legacy") as gen:
                             gen.generate_raw_u32(d)
                     with make_curand_generator(generator, seed=ctx.seed, offset=0, ordering="legacy") as gen:
-                        gen.generate_raw_u32(e)
-                        gen.generate_raw_u32(e)
+                        gen.generate_raw_u32(first)
+                        gen.generate_raw_u32(second)
+                    with make_curand_generator(generator, seed=ctx.seed, offset=0, ordering="legacy") as gen:
+                        gen.generate_raw_u32(full)
                 else:
                     gen_a = make_flagrand_generator(generator, seed=ctx.seed, offset=0)
                     gen_b = make_flagrand_generator(generator, seed=ctx.seed, offset=0)
                     gen_c = make_flagrand_generator(generator, seed=ctx.seed + 1, offset=0)
-                    gen_e = make_flagrand_generator(generator, seed=ctx.seed, offset=0)
+                    gen_split = make_flagrand_generator(generator, seed=ctx.seed, offset=0)
+                    gen_full = make_flagrand_generator(generator, seed=ctx.seed, offset=0)
                     flagrand_generate_raw(a, gen_a)
                     flagrand_generate_raw(b, gen_b)
                     flagrand_generate_raw(c, gen_c)
                     if d is not None:
                         gen_d = make_flagrand_generator(generator, seed=ctx.seed, offset=n)
                         flagrand_generate_raw(d, gen_d)
-                    flagrand_generate_raw(e, gen_e)
-                    flagrand_generate_raw(e, gen_e)
+                    flagrand_generate_raw(first, gen_split)
+                    flagrand_generate_raw(second, gen_split)
+                    flagrand_generate_raw(full, gen_full)
                 torch.cuda.synchronize()
                 checks: dict[str, Any] = {
                     "same_seed_same_output": tensors_equal(a, b),
                     "changed_seed_changes_output": not tensors_equal(a, c),
-                    "same_generator_second_call_advances": not tensors_equal(a, e),
+                    "same_generator_second_call_advances": not tensors_equal(a, second),
+                    "split_first_matches_full_prefix": tensors_equal(first, full[:n]),
+                    "split_second_matches_full_suffix": tensors_equal(second, full[n:]),
                     "offset_check_applicable": "yes" if info.supports_offset else "not_supported_by_generator",
                 }
                 if d is not None:
