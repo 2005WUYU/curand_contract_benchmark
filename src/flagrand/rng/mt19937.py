@@ -6,6 +6,8 @@ import torch
 import triton
 import triton.language as tl
 
+from flagrand.rng._sequence import clear_chunk_cache, generate_chunked
+
 
 # Multi-stream MT19937: NUM_STREAMS independent stream instances run in parallel.
 # Each is a legal 624-state MT19937, seeded by splitmix32(seed XOR stream_id) and
@@ -17,6 +19,7 @@ MT19937_N: int = 624
 MT19937_M: int = 397
 MT19937_INIT_MULT: int = 1812433253
 NUM_STREAMS: int = 8192
+SEQUENCE_CHUNK: int = NUM_STREAMS * MT19937_N
 
 
 @triton.jit
@@ -136,6 +139,7 @@ class Mt19937Generator:
             self._scratch = torch.empty_like(self._state)
             self._device = device
             self._initialized = True
+            clear_chunk_cache(self)
 
     def generate(
         self,
@@ -145,21 +149,35 @@ class Mt19937Generator:
         offset: int | None = None,
         **kwargs: object,
     ) -> torch.Tensor:
-        if self.offset != 0:
-            raise ValueError(
-                f"MT19937 does not support non-zero offset, got {self.offset}."
-            )
-
         n = out.numel()
         if n == 0:
             return out
 
+        if seed is not None:
+            raise ValueError("MT19937 explicit seed override is not supported.")
+        offset_val = self.offset if offset is None else int(offset)
+        if offset is not None and offset_val != self.offset:
+            raise ValueError("MT19937 explicit offset override is not supported.")
+        if offset_val != 0 and not self._initialized:
+            raise ValueError(f"MT19937 does not support non-zero initial offset, got {offset_val}.")
+
         device = out.device
         self._ensure_initialized(device)
 
-        # Each round produces NUM_STREAMS * N = ~5.1M outputs.
-        per_round = NUM_STREAMS * MT19937_N
-        n_rounds = (n + per_round - 1) // per_round
+        generate_chunked(
+            self,
+            out,
+            start=offset_val,
+            chunk_size=SEQUENCE_CHUNK,
+            cache_key=(self.seed, str(out.device), str(out.dtype)),
+            generate_chunk=lambda chunk, chunk_start: self._generate_chunk(chunk),
+        )
+        self.offset = offset_val + n
+        return out
+
+    def _generate_chunk(self, out: torch.Tensor) -> None:
+        n = out.numel()
+        n_rounds = (n + SEQUENCE_CHUNK - 1) // SEQUENCE_CHUNK
 
         state_u32 = self._state.view(-1).view(torch.uint32)
         scratch_u32 = self._scratch.view(-1).view(torch.uint32)
@@ -177,4 +195,3 @@ class Mt19937Generator:
             M=MT19937_M,
             num_warps=4,
         )
-        return out

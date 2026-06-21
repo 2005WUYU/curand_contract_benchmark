@@ -6,9 +6,11 @@ import torch
 import triton
 import triton.language as tl
 
+from flagrand.rng._sequence import generate_chunked
 
 _BLOCK: int = 256
 _TARGET_THREADS: int = 4096
+_SEQUENCE_CHUNK: int = 1 << 20
 
 
 @triton.jit
@@ -95,32 +97,49 @@ class XorwowGenerator:
         if n == 0:
             return out
 
-        n_threads = min(_TARGET_THREADS, ((n + _BLOCK - 1) // _BLOCK) * _BLOCK)
-        n_threads = max(n_threads, _BLOCK)
-        num_iters = (n + n_threads - 1) // n_threads
-        grid = ((n_threads + _BLOCK - 1) // _BLOCK,)
-
         seed_val = self.seed if seed is None else int(seed)
         offset_val = self.offset if offset is None else int(offset)
         if offset_val < 0:
             raise ValueError(f"XORWOW: offset must be >= 0, got {offset_val}.")
 
-        seed_lo = seed_val & 0xFFFFFFFF
-        seed_hi = (seed_val >> 32) & 0xFFFFFFFF
+        if seed is not None or offset is not None:
+            _launch_xorwow(out, seed_val, offset_val)
+            return out
 
-        out_u32 = out.view(-1).view(torch.uint32)
-
-        _xorwow_kernel[grid](
-            out_u32,
-            seed_lo,
-            seed_hi,
-            offset_val & 0xFFFFFFFF,
-            n,
-            n_threads,
-            num_iters,
-            BLOCK=_BLOCK,
-            num_warps=8,
+        generate_chunked(
+            self,
+            out,
+            start=offset_val,
+            chunk_size=_SEQUENCE_CHUNK,
+            cache_key=(seed_val, str(out.device), str(out.dtype)),
+            generate_chunk=lambda chunk, chunk_start: _launch_xorwow(chunk, seed_val, chunk_start),
         )
-        if seed is None and offset is None:
-            self.offset = offset_val + n
+        self.offset = offset_val + n
         return out
+
+
+def _launch_xorwow(out: torch.Tensor, seed_val: int, offset_val: int) -> None:
+    n = out.numel()
+    if n == 0:
+        return
+
+    n_threads = min(_TARGET_THREADS, ((n + _BLOCK - 1) // _BLOCK) * _BLOCK)
+    n_threads = max(n_threads, _BLOCK)
+    num_iters = (n + n_threads - 1) // n_threads
+    grid = ((n_threads + _BLOCK - 1) // _BLOCK,)
+
+    seed_lo = seed_val & 0xFFFFFFFF
+    seed_hi = (seed_val >> 32) & 0xFFFFFFFF
+    out_u32 = out.view(-1).view(torch.uint32)
+
+    _xorwow_kernel[grid](
+        out_u32,
+        seed_lo,
+        seed_hi,
+        offset_val & 0xFFFFFFFF,
+        n,
+        n_threads,
+        num_iters,
+        BLOCK=_BLOCK,
+        num_warps=8,
+    )

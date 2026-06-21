@@ -8,10 +8,13 @@ import torch
 import triton
 import triton.language as tl
 
+from flagrand.rng._sequence import clear_chunk_cache, generate_chunked
+
 _params = torch.load(str(Path(__file__).parent / "data" / "mtgp32_params.pt"), map_location="cpu")
 
 _MTGP32_BLOCK_SIZE = 256
 _MTGP32_MAX_BLOCKS = 192
+_SEQUENCE_CHUNK = _MTGP32_BLOCK_SIZE * _MTGP32_MAX_BLOCKS
 _MTGPDC_N = 351
 _MTGP32_STATE_SIZE = 1024
 _MTGP32_STATE_MASK = 1023
@@ -149,8 +152,8 @@ class Mtgp32Generator:
         **kwargs: object,
     ) -> torch.Tensor:
         offset_val = self.offset if offset is None else int(offset)
-        if offset_val != 0:
-            raise ValueError(f"MTGP32 does not support non-zero offset, got {offset_val}.")
+        if offset is not None and offset_val != self.offset:
+            raise ValueError("MTGP32 explicit offset override is not supported.")
         seed_val = self.seed if seed is None else int(seed)
         block_size = int(kwargs.get("block_size", _MTGP32_BLOCK_SIZE))
         if block_size != _MTGP32_BLOCK_SIZE:
@@ -158,10 +161,27 @@ class Mtgp32Generator:
         num_warps = kwargs.get("num_warps", 8)
 
         n = out.numel()
+        if n == 0:
+            return out
+        if seed is not None:
+            raise ValueError("MTGP32 explicit seed override is not supported.")
+
+        generate_chunked(
+            self,
+            out,
+            start=offset_val,
+            chunk_size=_SEQUENCE_CHUNK,
+            cache_key=(seed_val, str(out.device), str(out.dtype), num_warps),
+            generate_chunk=lambda chunk, chunk_start: self._generate_chunk(chunk, seed_val, num_warps),
+        )
+        self.offset = offset_val + n
+        return out
+
+    def _generate_chunk(self, out: torch.Tensor, seed_val: int, num_warps: int) -> None:
         device_str = str(out.device)
         pos, sh1, sh2, param, temper = _build_param_tensors(device_str)
 
-        blocks_needed = (n + _MTGP32_BLOCK_SIZE - 1) // _MTGP32_BLOCK_SIZE
+        blocks_needed = (out.numel() + _MTGP32_BLOCK_SIZE - 1) // _MTGP32_BLOCK_SIZE
         n_blocks = min(_MTGP32_MAX_BLOCKS, blocks_needed)
         num_iters = (blocks_needed + n_blocks - 1) // n_blocks
 
@@ -175,6 +195,7 @@ class Mtgp32Generator:
             self._ws_seed = seed_val
             self._ws_device = device_str
             self._ws_blocks = self._working_state.shape[0]
+            clear_chunk_cache(self)
         state = self._working_state[:n_blocks]
 
         grid = (n_blocks,)
@@ -186,7 +207,7 @@ class Mtgp32Generator:
             sh2[:n_blocks],
             param[: n_blocks * 16],
             temper[: n_blocks * 16],
-            n,
+            out.numel(),
             num_iters,
             n_blocks,
             BLOCK_SIZE=_MTGP32_BLOCK_SIZE,
@@ -195,5 +216,3 @@ class Mtgp32Generator:
             N_RECUR=_MTGPDC_N,
             num_warps=num_warps,
         )
-
-        return out

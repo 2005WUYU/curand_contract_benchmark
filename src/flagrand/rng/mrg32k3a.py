@@ -6,9 +6,11 @@ import torch
 import triton
 import triton.language as tl
 
+from flagrand.rng._sequence import generate_chunked
 
 _BLOCK: int = 128
 _TARGET_THREADS: int = 131072
+_SEQUENCE_CHUNK: int = 1 << 20
 
 
 @triton.jit
@@ -108,28 +110,44 @@ class Mrg32k3aGenerator:
         if n == 0:
             return out
 
-        n_threads = min(_TARGET_THREADS, ((n + _BLOCK - 1) // _BLOCK) * _BLOCK)
-        n_threads = max(n_threads, _BLOCK)
-        num_iters = (n + n_threads - 1) // n_threads
-        grid = ((n_threads + _BLOCK - 1) // _BLOCK,)
-
         seed_val = self.seed if seed is None else int(seed)
         offset_val = self.offset if offset is None else int(offset)
         if offset_val < 0:
             raise ValueError(f"MRG32K3A: offset must be >= 0, got {offset_val}.")
 
-        seed_u32 = seed_val & 0xFFFFFFFF
+        if seed is not None or offset is not None:
+            _launch_mrg32k3a(out, seed_val, offset_val)
+            return out
 
-        _mrg32k3a_kernel[grid](
-            out.view(-1),
-            seed_u32,
-            offset_val & 0xFFFFFFFF,
-            n,
-            n_threads,
-            num_iters,
-            BLOCK=_BLOCK,
-            num_warps=4,
+        generate_chunked(
+            self,
+            out,
+            start=offset_val,
+            chunk_size=_SEQUENCE_CHUNK,
+            cache_key=(seed_val, str(out.device), str(out.dtype)),
+            generate_chunk=lambda chunk, chunk_start: _launch_mrg32k3a(chunk, seed_val, chunk_start),
         )
-        if seed is None and offset is None:
-            self.offset = offset_val + n
+        self.offset = offset_val + n
         return out
+
+
+def _launch_mrg32k3a(out: torch.Tensor, seed_val: int, offset_val: int) -> None:
+    n = out.numel()
+    if n == 0:
+        return
+
+    n_threads = min(_TARGET_THREADS, ((n + _BLOCK - 1) // _BLOCK) * _BLOCK)
+    n_threads = max(n_threads, _BLOCK)
+    num_iters = (n + n_threads - 1) // n_threads
+    grid = ((n_threads + _BLOCK - 1) // _BLOCK,)
+
+    _mrg32k3a_kernel[grid](
+        out.view(-1),
+        seed_val & 0xFFFFFFFF,
+        offset_val & 0xFFFFFFFF,
+        n,
+        n_threads,
+        num_iters,
+        BLOCK=_BLOCK,
+        num_warps=4,
+    )

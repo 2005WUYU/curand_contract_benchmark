@@ -6,7 +6,6 @@ from flagrand._device import require_accelerator, assert_tensor_device_supported
 from flagrand.fused._internal.utils import (
     get_generator_type,
     GENERATOR_PHILOX,
-    GENERATOR_MTGP32,
     GENERATOR_SOBOL64,
     GENERATOR_SCRAMBLED_SOBOL64,
 )
@@ -43,15 +42,8 @@ def generate_raw(
                     f"generate_raw: Philox requires element count to be "
                     f"a multiple of 4, got {n}."
                 )
-        elif gen_type == GENERATOR_MTGP32:
-            if generator.offset != 0:
-                raise ValueError(
-                    f"generate_raw: MTGP32 does not support non-zero offset, "
-                    f"got {generator.offset}."
-                )
 
     if is_64:
         return generator.generate_long_long(out)
     else:
         return generator.generate(out)
-
