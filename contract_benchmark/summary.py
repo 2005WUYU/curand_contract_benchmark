@@ -13,6 +13,8 @@ def write_summary(path: Path, *, records: list[dict[str, Any]], capability_matri
 
 
 def summarize_records(records: list[dict[str, Any]], *, capability_matrix: dict[str, Any], environment: dict[str, Any]) -> dict[str, Any]:
+    claim_records = [record for record in records if not _is_diagnostic(record)]
+    diagnostic_records = [record for record in records if _is_diagnostic(record)]
     status_counts = Counter(str(record.get("validation", {}).get("status")) for record in records)
     formal_counts = Counter(str(record.get("formal_result")) for record in records)
     audit_flags = Counter(flag for record in records for flag in (record.get("audit_flags") or []))
@@ -20,21 +22,26 @@ def summarize_records(records: list[dict[str, Any]], *, capability_matrix: dict[
     unsupported_rows = [record for record in records if record.get("validation", {}).get("status") == "unsupported"]
     formal_speedups = [
         record
-        for record in records
+        for record in claim_records
         if not record.get("is_baseline")
         and record.get("formal_result")
         and record.get("speedup_baseline_formal")
         and record.get("speedup_gpu_vs_baseline") is not None
     ]
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "record_count": len(records),
+        "claim_record_count": len(claim_records),
+        "diagnostic_record_count": len(diagnostic_records),
         "commit": _commit_from_environment(environment),
         "validation_scope": "rough_gate",
         "status_counts": dict(status_counts),
         "formal_counts": dict(formal_counts),
         "audit_flag_counts": dict(audit_flags.most_common()),
         "task_counts": dict(Counter(record.get("task_id") for record in records)),
+        "diagnostic_counts_by_component": dict(Counter(record.get("diagnostic_component") for record in diagnostic_records)),
+        "diagnostic_counts_by_distribution": dict(Counter(record.get("distribution") for record in diagnostic_records)),
+        "diagnostic_validation_counts": dict(Counter(str(record.get("validation", {}).get("status")) for record in diagnostic_records)),
         "failure_counts_by_task": dict(Counter(record.get("task_id") for record in failures)),
         "unsupported_counts_by_task": dict(Counter(record.get("task_id") for record in unsupported_rows)),
         "unsupported_counts_by_backend": dict(Counter(record.get("backend") for record in unsupported_rows)),
@@ -119,3 +126,7 @@ def _commit_from_environment(environment: dict[str, Any]) -> str | None:
     if environment.get("launcher_git_commit"):
         return str(environment.get("launcher_git_commit"))
     return None
+
+
+def _is_diagnostic(record: dict[str, Any]) -> bool:
+    return record.get("result_role") == "diagnostic" or record.get("family") == "diagnostic"

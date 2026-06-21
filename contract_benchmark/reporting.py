@@ -31,11 +31,13 @@ def write_csv(path: Path, records: list[dict[str, Any]]) -> None:
     fields = [
         "task_id",
         "claim_id",
+        "result_role",
         "backend",
         "gate_backend",
         "api_surface",
         "generator",
         "distribution",
+        "diagnostic_component",
         "ordering",
         "N",
         "parameters",
@@ -124,6 +126,8 @@ def write_report(
     lines.append("|---|---|---|---:|---:|---:|---:|---:|---:|---|---|---|---|")
     for task_id in sorted(by_task):
         for record in by_task[task_id]:
+            if _is_diagnostic(record):
+                continue
             validation = record.get("validation", {})
             lines.append(
                 "| {task} | {backend} | {generator} | {distribution} | {n} | {gpu} | {wall} | {sg} | {sw} | {formal} | {baseline_formal} | {validation} | {audit} |".format(
@@ -143,6 +147,11 @@ def write_report(
                 )
             )
 
+    diagnostic_lines = _distribution_diagnostics(records)
+    if diagnostic_lines:
+        lines.extend(["", "## Distribution Diagnostics", ""])
+        lines.extend(diagnostic_lines)
+
     lines.extend(["", "## Operator Walkthrough: F1 Add Uniform", ""])
     lines.extend(_f1_walkthrough(records, h20_reference))
 
@@ -160,12 +169,70 @@ def write_report(
         [
             "- `task_registry.json`: full claim/task/timing/validation contract.",
             "- `capability_matrix.json`: available and unsupported backends.",
+            "- `summary.json`: machine-readable run summary and diagnostic counts.",
             "- `results.jsonl`: full records with raw samples.",
             "- `results.csv`: compact table for spreadsheet use.",
             "- `environment.json`: versions and profile.",
         ]
     )
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _distribution_diagnostics(records: list[dict[str, Any]]) -> list[str]:
+    diagnostic_records = [record for record in records if _is_diagnostic(record)]
+    if not diagnostic_records:
+        return []
+
+    grouped: dict[tuple[str, int, str], dict[str, dict[str, Any]]] = defaultdict(dict)
+    for record in diagnostic_records:
+        params = record.get("parameters") or {}
+        lambda_value = params.get("lambda")
+        lambda_label = "" if lambda_value is None else f"lambda={lambda_value}"
+        key = (str(record.get("distribution")), int(record.get("N") or 0), lambda_label)
+        component = str(record.get("diagnostic_component") or params.get("component") or record.get("backend"))
+        grouped[key][component] = record
+
+    lines = [
+        "Diagnostic-only rows are excluded from formal speedup claims. They use selected sizes only, so the full record remains in `results.jsonl`/`results.csv` without expanding the main result table.",
+        "",
+        "| distribution | N | params | raw_only_gpu_us | transform_only_gpu_us | raw_plus_transform_gpu_us | public_api_gpu_us | validation |",
+        "|---|---:|---|---:|---:|---:|---:|---|",
+    ]
+    for (distribution, n, params), components in sorted(grouped.items()):
+        lines.append(
+            "| {distribution} | {n} | {params} | {raw} | {transform} | {combined} | {public} | {validation} |".format(
+                distribution=distribution,
+                n=n,
+                params=params,
+                raw=_component_time(components.get("raw_only")),
+                transform=_component_time(components.get("transform_only")),
+                combined=_component_time(components.get("raw_plus_transform")),
+                public=_component_time(components.get("public_api")),
+                validation=_component_validation(components),
+            )
+        )
+    return lines
+
+
+def _component_time(record: dict[str, Any] | None) -> str:
+    if not record:
+        return ""
+    return _fmt(record.get("median_gpu_us"))
+
+
+def _component_validation(components: dict[str, dict[str, Any]]) -> str:
+    failures = sorted(
+        component
+        for component, record in components.items()
+        if record.get("validation", {}).get("status") != "pass"
+    )
+    if not failures:
+        return "pass"
+    return "fail:" + ",".join(failures)
+
+
+def _is_diagnostic(record: dict[str, Any]) -> bool:
+    return record.get("result_role") == "diagnostic" or record.get("family") == "diagnostic"
 
 
 def _f1_walkthrough(records: list[dict[str, Any]], h20_reference: dict[str, Any] | None) -> list[str]:

@@ -8,6 +8,7 @@ from contract_benchmark.records import error_record, finalize_records, metadata_
 from contract_benchmark.spec import TaskSpec
 from contract_benchmark.tasks.bulk import run_bulk_distribution, run_bulk_raw32, run_bulk_raw64, run_ordering_sweep, run_poisson
 from contract_benchmark.tasks.device import run_device_raw_output, run_device_uniform_output, run_e1_compile_support_matrix, run_m3_device_fused_consume
+from contract_benchmark.tasks.distribution_diagnostics import run_distribution_decomposition
 from contract_benchmark.tasks.fused import run_add_uniform, run_dropout, run_threshold
 from contract_benchmark.tasks.gates import run_g0, run_g1, run_g2, run_g3
 from contract_benchmark.tasks.granularity import run_many_small, run_single_call_curve
@@ -56,6 +57,7 @@ def _task_runners() -> dict[str, TaskRunner]:
         "H3_NORMAL_F32_BULK": lambda c, s: run_bulk_distribution(c, s, "normal_f32"),
         "H4_LOGNORMAL_F32_BULK": lambda c, s: run_bulk_distribution(c, s, "lognormal_f32"),
         "H5_POISSON_LAMBDA_SWEEP": run_poisson,
+        "D0_DISTRIBUTION_DECOMPOSITION": run_distribution_decomposition,
         "H6_ORDERING_SWEEP": run_ordering_sweep,
         "I1_GENERATOR_LIFECYCLE": run_lifecycle,
         "I2_CURAND_GENERATE_SEEDS": run_generate_seeds,
