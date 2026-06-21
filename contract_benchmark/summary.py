@@ -44,6 +44,8 @@ def summarize_records(records: list[dict[str, Any]], *, capability_matrix: dict[
         "diagnostic_counts_by_distribution": dict(Counter(record.get("distribution") for record in diagnostic_records)),
         "diagnostic_validation_counts": dict(Counter(str(record.get("validation", {}).get("status")) for record in diagnostic_records)),
         "diagnostic_source_status_counts": dict(Counter(str(record.get("source_semantic_status")) for record in diagnostic_records if record.get("source_semantic_status"))),
+        "semantic_model_counts": dict(Counter(str(record.get("semantic_model")) for record in records if record.get("semantic_model"))),
+        "semantic_equivalence_counts": dict(Counter(str(record.get("semantic_equivalence")) for record in records if record.get("semantic_equivalence"))),
         "failure_counts_by_task": dict(Counter(record.get("task_id") for record in failures)),
         "unsupported_counts_by_task": dict(Counter(record.get("task_id") for record in unsupported_rows)),
         "unsupported_counts_by_backend": dict(Counter(record.get("backend") for record in unsupported_rows)),
@@ -51,6 +53,7 @@ def summarize_records(records: list[dict[str, Any]], *, capability_matrix: dict[
         "gate_backend_alias_counts": _gate_backend_alias_counts(records),
         "formal_speedups": _speedup_summary(formal_speedups),
         "formal_speedups_by_task": _speedups_by_task(formal_speedups),
+        "formal_speedups_by_semantic_equivalence": _speedups_by_semantic_equivalence(formal_speedups),
         "failures": [_failure_summary(record) for record in failures],
         "capabilities": {
             "device_api_extension": _capability_support(capability_matrix.get("device_api_extension", {})),
@@ -62,6 +65,11 @@ def summarize_records(records: list[dict[str, Any]], *, capability_matrix: dict[
 def _run_health(records: list[dict[str, Any]]) -> dict[str, Any]:
     gate_task_ids = {"G0_BASIC_CONTRACT", "G1_DISTRIBUTION_ROUGH_CHECK", "G2_REPRODUCIBILITY"}
     runtime_error_count = sum(1 for record in records if "runtime_error" in (record.get("audit_flags") or []))
+    formal_gate_leak_count = sum(
+        1
+        for record in records
+        if record.get("formal_result") and _has_gate_failure(record)
+    )
     required_gate_failures = [
         record
         for record in records
@@ -70,11 +78,15 @@ def _run_health(records: list[dict[str, Any]]) -> dict[str, Any]:
     cross_gate_failure_count = sum(len(record.get("cross_record_gate_failures") or []) for record in records)
     diagnostic_source_failure_count = sum(1 for record in records if record.get("source_semantic_status") == "failed")
     status = "ok"
-    if runtime_error_count or required_gate_failures:
+    if runtime_error_count or formal_gate_leak_count:
         status = "needs_attention"
+    elif required_gate_failures:
+        status = "usable_with_gated_failures"
     return {
         "status": status,
+        "status_reason": _run_health_reason(status),
         "runtime_error_count": runtime_error_count,
+        "formal_gate_leak_count": formal_gate_leak_count,
         "required_gate_failure_count": len(required_gate_failures),
         "required_gate_failures_by_task": dict(Counter(record.get("task_id") for record in required_gate_failures)),
         "cross_record_gate_failure_count": cross_gate_failure_count,
@@ -99,6 +111,29 @@ def _speedups_by_task(records: list[dict[str, Any]]) -> dict[str, Any]:
     for record in records:
         grouped[str(record.get("task_id"))].append(record)
     return {task_id: _speedup_summary(rows) for task_id, rows in sorted(grouped.items())}
+
+
+def _speedups_by_semantic_equivalence(records: list[dict[str, Any]]) -> dict[str, Any]:
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for record in records:
+        key = str(record.get("semantic_equivalence") or "unspecified")
+        grouped[key].append(record)
+    return {key: _speedup_summary(rows) for key, rows in sorted(grouped.items())}
+
+
+def _has_gate_failure(record: dict[str, Any]) -> bool:
+    flags = record.get("audit_flags") or []
+    if any("gate_failed" in str(flag) for flag in flags):
+        return True
+    return bool(record.get("cross_record_gate_failures"))
+
+
+def _run_health_reason(status: str) -> str:
+    if status == "needs_attention":
+        return "Runtime errors or formal records with gate failures are present."
+    if status == "usable_with_gated_failures":
+        return "Required gates failed for some implementations, but their downstream formal results are gated off."
+    return "No runtime errors or required gate failures were found."
 
 
 def _cross_record_gate_failure_counts(records: list[dict[str, Any]]) -> dict[str, int]:

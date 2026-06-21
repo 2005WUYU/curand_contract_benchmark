@@ -38,6 +38,9 @@ def write_csv(path: Path, records: list[dict[str, Any]]) -> None:
         "generator",
         "distribution",
         "diagnostic_component",
+        "semantic_model",
+        "semantic_equivalence",
+        "accepted_approximation",
         "source_semantic_status",
         "source_gate_backend",
         "source_gate_failures",
@@ -116,6 +119,11 @@ def write_report(
     lines.extend(["", "## Run Health", ""])
     lines.extend(_run_health_lines(records))
 
+    semantic_lines = _semantic_notes(records)
+    if semantic_lines:
+        lines.extend(["", "## Semantic Notes", ""])
+        lines.extend(semantic_lines)
+
     lines.extend(["", "## Capability Matrix", ""])
     device_ext = capability_matrix.get("device_api_extension", {})
     curanddx = capability_matrix.get("curanddx", {})
@@ -128,20 +136,21 @@ def write_report(
 
     lines.extend(["", "## Task Results", ""])
     lines.append(
-        "| task | backend | generator | distribution | N | gpu_us | wall_us | speedup_gpu | speedup_wall | formal | baseline_formal | validation | audit |"
+        "| task | backend | generator | distribution | semantic | N | gpu_us | wall_us | speedup_gpu | speedup_wall | formal | baseline_formal | validation | audit |"
     )
-    lines.append("|---|---|---|---:|---:|---:|---:|---:|---:|---|---|---|---|")
+    lines.append("|---|---|---|---|---|---:|---:|---:|---:|---:|---|---|---|---|")
     for task_id in sorted(by_task):
         for record in by_task[task_id]:
             if _is_diagnostic(record):
                 continue
             validation = record.get("validation", {})
             lines.append(
-                "| {task} | {backend} | {generator} | {distribution} | {n} | {gpu} | {wall} | {sg} | {sw} | {formal} | {baseline_formal} | {validation} | {audit} |".format(
+                "| {task} | {backend} | {generator} | {distribution} | {semantic} | {n} | {gpu} | {wall} | {sg} | {sw} | {formal} | {baseline_formal} | {validation} | {audit} |".format(
                     task=task_id,
                     backend=record.get("backend"),
                     generator=record.get("generator"),
                     distribution=record.get("distribution"),
+                    semantic=_semantic_label(record),
                     n=record.get("N"),
                     gpu=_fmt(record.get("median_gpu_us")),
                     wall=_fmt(record.get("median_wall_sync_us")),
@@ -202,15 +211,16 @@ def _distribution_diagnostics(records: list[dict[str, Any]]) -> list[str]:
     lines = [
         "Diagnostic-only rows are excluded from formal speedup claims. They use selected sizes only, so the full record remains in `results.jsonl`/`results.csv` without expanding the main result table.",
         "",
-        "| distribution | N | params | raw_only_gpu_us | transform_only_gpu_us | raw_plus_transform_gpu_us | public_api_gpu_us | validation | source_gates |",
-        "|---|---:|---|---:|---:|---:|---:|---|---|",
+        "| distribution | N | params | semantic | raw_only_gpu_us | transform_only_gpu_us | raw_plus_transform_gpu_us | public_api_gpu_us | validation | source_gates |",
+        "|---|---:|---|---|---:|---:|---:|---:|---|---|",
     ]
     for (distribution, n, params), components in sorted(grouped.items()):
         lines.append(
-            "| {distribution} | {n} | {params} | {raw} | {transform} | {combined} | {public} | {validation} | {source} |".format(
+            "| {distribution} | {n} | {params} | {semantic} | {raw} | {transform} | {combined} | {public} | {validation} | {source} |".format(
                 distribution=distribution,
                 n=n,
                 params=params,
+                semantic=_components_semantic_label(components),
                 raw=_component_time(components.get("raw_only")),
                 transform=_component_time(components.get("transform_only")),
                 combined=_component_time(components.get("raw_plus_transform")),
@@ -239,6 +249,42 @@ def _component_validation(components: dict[str, dict[str, Any]]) -> str:
     return "fail:" + ",".join(failures)
 
 
+def _semantic_notes(records: list[dict[str, Any]]) -> list[str]:
+    approximate_poisson = [
+        record
+        for record in records
+        if record.get("semantic_equivalence") == "accepted_approximation"
+    ]
+    if not approximate_poisson:
+        return []
+    counts = defaultdict(int)
+    for record in approximate_poisson:
+        counts[str(record.get("task_id"))] += 1
+    count_text = ", ".join(f"`{task}`={count}" for task, count in sorted(counts.items()))
+    return [
+        "FlagRand Poisson rows with `lambda >= 30` are marked as `accepted_approximation:poisson_normal_approximation`.",
+        "These rows are useful for approximate-Poisson engineering comparisons, but they should not be described as strict cuRAND-equivalent Poisson.",
+        f"- approximate rows by task: {count_text}",
+    ]
+
+
+def _semantic_label(record: dict[str, Any]) -> str:
+    semantic = record.get("semantic_equivalence")
+    model = record.get("semantic_model")
+    if semantic and model:
+        return f"{semantic}:{model}"
+    if semantic:
+        return str(semantic)
+    if model:
+        return str(model)
+    return ""
+
+
+def _components_semantic_label(components: dict[str, dict[str, Any]]) -> str:
+    labels = sorted({_semantic_label(record) for record in components.values() if _semantic_label(record)})
+    return ",".join(labels)
+
+
 def _component_source_status(components: dict[str, dict[str, Any]]) -> str:
     failures = []
     for component, record in sorted(components.items()):
@@ -256,23 +302,39 @@ def _component_source_status(components: dict[str, dict[str, Any]]) -> str:
 def _run_health_lines(records: list[dict[str, Any]]) -> list[str]:
     gate_task_ids = {"G0_BASIC_CONTRACT", "G1_DISTRIBUTION_ROUGH_CHECK", "G2_REPRODUCIBILITY"}
     runtime_error_count = sum(1 for record in records if "runtime_error" in (record.get("audit_flags") or []))
+    formal_gate_leak_count = sum(1 for record in records if record.get("formal_result") and _has_gate_failure(record))
     required_gate_failures = [
         record
         for record in records
         if record.get("task_id") in gate_task_ids and record.get("validation", {}).get("status") == "fail"
     ]
-    status = "needs_attention" if runtime_error_count or required_gate_failures else "ok"
+    if runtime_error_count or formal_gate_leak_count:
+        status = "needs_attention"
+    elif required_gate_failures:
+        status = "usable_with_gated_failures"
+    else:
+        status = "ok"
     lines = [
         f"- status: `{status}`",
         f"- runtime errors: `{runtime_error_count}`",
+        f"- formal gate leaks: `{formal_gate_leak_count}`",
         f"- required gate failures: `{len(required_gate_failures)}`",
     ]
+    if status == "usable_with_gated_failures":
+        lines.append("- interpretation: required gates failed for some implementations, but affected downstream formal results were gated off.")
     if required_gate_failures:
         counts = defaultdict(int)
         for record in required_gate_failures:
             counts[str(record.get("task_id"))] += 1
         lines.append("- required gate failures by task: " + ", ".join(f"`{task}`={count}" for task, count in sorted(counts.items())))
     return lines
+
+
+def _has_gate_failure(record: dict[str, Any]) -> bool:
+    flags = record.get("audit_flags") or []
+    if any("gate_failed" in str(flag) for flag in flags):
+        return True
+    return bool(record.get("cross_record_gate_failures"))
 
 
 def _is_diagnostic(record: dict[str, Any]) -> bool:

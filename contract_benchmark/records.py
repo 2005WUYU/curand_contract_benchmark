@@ -33,6 +33,11 @@ DIAGNOSTIC_DISTRIBUTION_COMPONENTS = {
     "transform_only",
 }
 
+POISSON_NORMAL_APPROXIMATION_NOTE = (
+    "FlagRand lambda >= 30 Poisson uses a normal approximation; use these rows "
+    "as accepted approximate-Poisson performance, not strict cuRAND-equivalent Poisson."
+)
+
 
 def timed_record(
     ctx: Any,
@@ -193,6 +198,7 @@ def error_record(
 
 def finalize_records(records: list[dict[str, Any]]) -> None:
     apply_cross_record_gates(records)
+    annotate_poisson_semantics(records)
     compute_speedups(records)
 
 
@@ -266,6 +272,43 @@ def annotate_diagnostic_source_gates(
         record["source_gate_backend"] = source_backend
         record["source_gate_failures"] = source_failures
         record["source_semantic_status"] = "failed" if source_failures else "passed_known_gates"
+
+
+def annotate_poisson_semantics(records: list[dict[str, Any]]) -> None:
+    for record in records:
+        if record.get("distribution") != "poisson_u32":
+            continue
+        lambda_val = _lambda_parameter(record)
+        if lambda_val is None:
+            continue
+        if str(record.get("backend", "")).startswith("curand"):
+            record["semantic_model"] = "strict_poisson"
+            record["semantic_equivalence"] = "reference"
+        elif _is_flagrand_record(record) and lambda_val >= 30.0:
+            record["semantic_model"] = "poisson_normal_approximation"
+            record["semantic_equivalence"] = "accepted_approximation"
+            record["accepted_approximation"] = True
+            add_audit_flag(record, "poisson_normal_approximation")
+            limitations = record.setdefault("known_limitations", [])
+            if POISSON_NORMAL_APPROXIMATION_NOTE not in limitations:
+                limitations.append(POISSON_NORMAL_APPROXIMATION_NOTE)
+        elif _is_flagrand_record(record):
+            record["semantic_model"] = "poisson_inverse_cdf"
+            record["semantic_equivalence"] = "intended_strict_poisson"
+
+
+def _lambda_parameter(record: dict[str, Any]) -> float | None:
+    params = record.get("parameters") or {}
+    if "lambda" not in params:
+        return None
+    try:
+        return float(params["lambda"])
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_flagrand_record(record: dict[str, Any]) -> bool:
+    return str(record.get("backend", "")).startswith("flagrand")
 
 
 def canonical_gate_backend(backend: str) -> str:

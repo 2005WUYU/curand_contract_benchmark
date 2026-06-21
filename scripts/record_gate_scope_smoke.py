@@ -30,6 +30,7 @@ def _record(
     formal_result: bool = True,
     result_role: str | None = None,
     diagnostic_component: str | None = None,
+    parameters: dict[str, object] | None = None,
 ) -> dict[str, object]:
     record: dict[str, object] = {
         "task_id": task_id,
@@ -39,6 +40,7 @@ def _record(
         "generator": generator,
         "distribution": distribution,
         "validation": {"status": validation_status, "checks": {}},
+        "parameters": parameters or {},
         "comparison_key": comparison_key,
         "formal_result": formal_result,
         "audit_flags": [],
@@ -53,7 +55,7 @@ def _record(
 def main() -> None:
     _install_torch_stub_if_needed()
 
-    from contract_benchmark.records import apply_cross_record_gates
+    from contract_benchmark.records import finalize_records
 
     records = [
         _record(task_id="G2_REPRODUCIBILITY", backend="flagrand_public", validation_status="fail", comparison_key=None, formal_result=False),
@@ -63,8 +65,9 @@ def main() -> None:
         _record(task_id="F1_ADD_UNIFORM", backend="flagrand_fused_philox", distribution="uniform_add_consume"),
         _record(task_id="I1_GENERATOR_LIFECYCLE", backend="flagrand_lifecycle", distribution="lifecycle"),
         _record(task_id="D0_DISTRIBUTION_DECOMPOSITION", backend="flagrand_diag_transform_only", distribution="poisson_u32", comparison_key=None, formal_result=False, result_role="diagnostic", diagnostic_component="transform_only"),
+        _record(task_id="H5_POISSON_LAMBDA_SWEEP", backend="flagrand_public", distribution="poisson_u32", formal_result=True, parameters={"lambda": 64.0}),
     ]
-    apply_cross_record_gates(records)
+    finalize_records(records)
 
     by_backend = {str(record["backend"]): record for record in records}
     assert by_backend["flagrand_public_output"]["formal_result"] is False
@@ -81,6 +84,10 @@ def main() -> None:
     assert by_backend["flagrand_diag_transform_only"]["source_gate_failures"] == ["G1_DISTRIBUTION_ROUGH_CHECK", "G2_REPRODUCIBILITY"]
     assert "source_distribution_gate_failed" in by_backend["flagrand_diag_transform_only"]["audit_flags"]
     assert "source_sequence_semantics_gate_failed" in by_backend["flagrand_diag_transform_only"]["audit_flags"]
+    poisson = [record for record in records if record["task_id"] == "H5_POISSON_LAMBDA_SWEEP"][0]
+    assert poisson["semantic_equivalence"] == "accepted_approximation"
+    assert poisson["semantic_model"] == "poisson_normal_approximation"
+    assert "poisson_normal_approximation" in poisson["audit_flags"]
     print("record gate scope smoke ok")
 
 
