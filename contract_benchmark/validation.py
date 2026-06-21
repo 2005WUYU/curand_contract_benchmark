@@ -170,7 +170,9 @@ def validate_finite_output(out: torch.Tensor, *, n: int) -> dict[str, Any]:
     return validation_pass(checks)
 
 
-def tensors_equal(a: torch.Tensor, b: torch.Tensor, *, max_items: int = 4096) -> bool:
+def tensors_equal(a: torch.Tensor, b: torch.Tensor, *, max_items: int | None = None) -> bool:
+    if max_items is None:
+        return bool(torch.equal(a, b))
     aa = _sample_cpu(a, max_items=max_items)
     bb = _sample_cpu(b, max_items=max_items)
     return bool(torch.equal(aa, bb))

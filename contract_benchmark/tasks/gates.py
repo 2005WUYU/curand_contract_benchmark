@@ -77,66 +77,93 @@ def run_g2(ctx: BenchmarkContext, spec: TaskSpec) -> list[dict[str, Any]]:
     ]
     for generator in generators:
         info = GENERATOR_INFOS[generator]
-        n = adjust_n(ctx.profile.gate_n, generator, "raw32")
+        probe_sizes = _g2_probe_sizes(ctx, generator)
         for backend in ("curand_host", "flagrand_public"):
             if backend == "curand_host" and not info.supports_curand_host:
                 continue
             if backend == "flagrand_public" and not info.supports_flagrand:
                 continue
-            try:
-                a = torch.empty(n, device=ctx.device, dtype=torch.int32)
-                b = torch.empty_like(a)
-                c = torch.empty_like(a)
-                first = torch.empty_like(a)
-                second = torch.empty_like(a)
-                full = torch.empty(n * 2, device=ctx.device, dtype=torch.int32)
-                d = torch.empty_like(a) if info.supports_offset else None
-                if backend == "curand_host":
-                    with make_curand_generator(generator, seed=ctx.seed, offset=0, ordering="legacy") as gen:
-                        gen.generate_raw_u32(a)
-                    with make_curand_generator(generator, seed=ctx.seed, offset=0, ordering="legacy") as gen:
-                        gen.generate_raw_u32(b)
-                    with make_curand_generator(generator, seed=ctx.seed + 1, offset=0, ordering="legacy") as gen:
-                        gen.generate_raw_u32(c)
-                    if d is not None:
-                        with make_curand_generator(generator, seed=ctx.seed, offset=n, ordering="legacy") as gen:
-                            gen.generate_raw_u32(d)
-                    with make_curand_generator(generator, seed=ctx.seed, offset=0, ordering="legacy") as gen:
-                        gen.generate_raw_u32(first)
-                        gen.generate_raw_u32(second)
-                    with make_curand_generator(generator, seed=ctx.seed, offset=0, ordering="legacy") as gen:
-                        gen.generate_raw_u32(full)
-                else:
-                    gen_a = make_flagrand_generator(generator, seed=ctx.seed, offset=0)
-                    gen_b = make_flagrand_generator(generator, seed=ctx.seed, offset=0)
-                    gen_c = make_flagrand_generator(generator, seed=ctx.seed + 1, offset=0)
-                    gen_split = make_flagrand_generator(generator, seed=ctx.seed, offset=0)
-                    gen_full = make_flagrand_generator(generator, seed=ctx.seed, offset=0)
-                    flagrand_generate_raw(a, gen_a)
-                    flagrand_generate_raw(b, gen_b)
-                    flagrand_generate_raw(c, gen_c)
-                    if d is not None:
-                        gen_d = make_flagrand_generator(generator, seed=ctx.seed, offset=n)
-                        flagrand_generate_raw(d, gen_d)
-                    flagrand_generate_raw(first, gen_split)
-                    flagrand_generate_raw(second, gen_split)
-                    flagrand_generate_raw(full, gen_full)
-                torch.cuda.synchronize()
-                checks: dict[str, Any] = {
-                    "same_seed_same_output": tensors_equal(a, b),
-                    "changed_seed_changes_output": not tensors_equal(a, c),
-                    "same_generator_second_call_advances": not tensors_equal(a, second),
-                    "split_first_matches_full_prefix": tensors_equal(first, full[:n]),
-                    "split_second_matches_full_suffix": tensors_equal(second, full[n:]),
-                    "offset_check_applicable": "yes" if info.supports_offset else "not_supported_by_generator",
-                }
-                if d is not None:
-                    checks["changed_offset_changes_output"] = not tensors_equal(a, d)
-                validation = validation_pass(checks)
-                records.append(gate_record(ctx, spec, backend, generator, "raw32", n, validation))
-            except BaseException as exc:
-                records.append(error_record(ctx, spec, backend, exc, generator=generator, distribution="raw32", n=n))
+            for n in probe_sizes:
+                try:
+                    checks = _g2_sequence_checks(ctx, generator, backend, info.supports_offset, n)
+                    records.append(gate_record(ctx, spec, backend, generator, "raw32", n, validation_pass(checks)))
+                except BaseException as exc:
+                    records.append(error_record(ctx, spec, backend, exc, generator=generator, distribution="raw32", n=n))
     return records
+
+
+def _g2_probe_sizes(ctx: BenchmarkContext, generator: str) -> list[int]:
+    raw_sizes = [
+        4096,
+        ctx.profile.gate_n,
+        ctx.profile.gate_n + 123,
+        65536,
+        131072,
+        262144,
+    ]
+    return sorted({adjust_n(n, generator, "raw32") for n in raw_sizes})
+
+
+def _g2_sequence_checks(ctx: BenchmarkContext, generator: str, backend: str, supports_offset: bool, n: int) -> dict[str, Any]:
+    a = torch.empty(n, device=ctx.device, dtype=torch.int32)
+    b = torch.empty_like(a)
+    c = torch.empty_like(a)
+    first = torch.empty_like(a)
+    second = torch.empty_like(a)
+    third = torch.empty_like(a)
+    full = torch.empty(n * 3, device=ctx.device, dtype=torch.int32)
+    offset_segment = torch.empty_like(a) if supports_offset else None
+
+    if backend == "curand_host":
+        with make_curand_generator(generator, seed=ctx.seed, offset=0, ordering="legacy") as gen:
+            gen.generate_raw_u32(a)
+        with make_curand_generator(generator, seed=ctx.seed, offset=0, ordering="legacy") as gen:
+            gen.generate_raw_u32(b)
+        with make_curand_generator(generator, seed=ctx.seed + 1, offset=0, ordering="legacy") as gen:
+            gen.generate_raw_u32(c)
+        if offset_segment is not None:
+            with make_curand_generator(generator, seed=ctx.seed, offset=n, ordering="legacy") as gen:
+                gen.generate_raw_u32(offset_segment)
+        with make_curand_generator(generator, seed=ctx.seed, offset=0, ordering="legacy") as gen:
+            gen.generate_raw_u32(first)
+            gen.generate_raw_u32(second)
+            gen.generate_raw_u32(third)
+        with make_curand_generator(generator, seed=ctx.seed, offset=0, ordering="legacy") as gen:
+            gen.generate_raw_u32(full)
+    else:
+        gen_a = make_flagrand_generator(generator, seed=ctx.seed, offset=0)
+        gen_b = make_flagrand_generator(generator, seed=ctx.seed, offset=0)
+        gen_c = make_flagrand_generator(generator, seed=ctx.seed + 1, offset=0)
+        gen_split = make_flagrand_generator(generator, seed=ctx.seed, offset=0)
+        gen_full = make_flagrand_generator(generator, seed=ctx.seed, offset=0)
+        flagrand_generate_raw(a, gen_a)
+        flagrand_generate_raw(b, gen_b)
+        flagrand_generate_raw(c, gen_c)
+        if offset_segment is not None:
+            gen_offset = make_flagrand_generator(generator, seed=ctx.seed, offset=n)
+            flagrand_generate_raw(offset_segment, gen_offset)
+        flagrand_generate_raw(first, gen_split)
+        flagrand_generate_raw(second, gen_split)
+        flagrand_generate_raw(third, gen_split)
+        flagrand_generate_raw(full, gen_full)
+
+    torch.cuda.synchronize()
+    checks: dict[str, Any] = {
+        "probe_size": n,
+        "full_tensor_equality": True,
+        "same_seed_same_output": tensors_equal(a, b),
+        "changed_seed_changes_output": not tensors_equal(a, c),
+        "same_generator_second_call_advances": not tensors_equal(a, second),
+        "same_generator_third_call_advances": not tensors_equal(second, third),
+        "split_first_matches_full_prefix": tensors_equal(first, full[:n]),
+        "split_second_matches_full_middle": tensors_equal(second, full[n : 2 * n]),
+        "split_third_matches_full_suffix": tensors_equal(third, full[2 * n :]),
+        "offset_check_applicable": "yes" if supports_offset else "not_supported_by_generator",
+    }
+    if offset_segment is not None:
+        checks["changed_offset_changes_output"] = not tensors_equal(a, offset_segment)
+        checks["offset_matches_full_second_segment"] = tensors_equal(offset_segment, full[n : 2 * n])
+    return checks
 
 
 def run_g3(ctx: BenchmarkContext, spec: TaskSpec) -> list[dict[str, Any]]:

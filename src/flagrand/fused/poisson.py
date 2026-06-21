@@ -22,7 +22,7 @@ _64BIT_GENERATORS = {GENERATOR_SOBOL64, GENERATOR_SCRAMBLED_SOBOL64}
 def _poisson_inverse_from_uniform(u, lambda_val, MAX_K: tl.constexpr):
     p = tl.exp(-lambda_val)
     cdf = p
-    k = tl.zeros_like(u, dtype=tl.int32)
+    k = tl.full(u.shape, 0, tl.int32)
     for i in range(1, MAX_K + 1):
         active = u > cdf
         p = p * lambda_val / i

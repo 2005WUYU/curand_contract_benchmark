@@ -38,10 +38,12 @@ def summarize_records(records: list[dict[str, Any]], *, capability_matrix: dict[
         "status_counts": dict(status_counts),
         "formal_counts": dict(formal_counts),
         "audit_flag_counts": dict(audit_flags.most_common()),
+        "run_health": _run_health(records),
         "task_counts": dict(Counter(record.get("task_id") for record in records)),
         "diagnostic_counts_by_component": dict(Counter(record.get("diagnostic_component") for record in diagnostic_records)),
         "diagnostic_counts_by_distribution": dict(Counter(record.get("distribution") for record in diagnostic_records)),
         "diagnostic_validation_counts": dict(Counter(str(record.get("validation", {}).get("status")) for record in diagnostic_records)),
+        "diagnostic_source_status_counts": dict(Counter(str(record.get("source_semantic_status")) for record in diagnostic_records if record.get("source_semantic_status"))),
         "failure_counts_by_task": dict(Counter(record.get("task_id") for record in failures)),
         "unsupported_counts_by_task": dict(Counter(record.get("task_id") for record in unsupported_rows)),
         "unsupported_counts_by_backend": dict(Counter(record.get("backend") for record in unsupported_rows)),
@@ -54,6 +56,29 @@ def summarize_records(records: list[dict[str, Any]], *, capability_matrix: dict[
             "device_api_extension": _capability_support(capability_matrix.get("device_api_extension", {})),
             "curanddx": _capability_support(capability_matrix.get("curanddx", {})),
         },
+    }
+
+
+def _run_health(records: list[dict[str, Any]]) -> dict[str, Any]:
+    gate_task_ids = {"G0_BASIC_CONTRACT", "G1_DISTRIBUTION_ROUGH_CHECK", "G2_REPRODUCIBILITY"}
+    runtime_error_count = sum(1 for record in records if "runtime_error" in (record.get("audit_flags") or []))
+    required_gate_failures = [
+        record
+        for record in records
+        if record.get("task_id") in gate_task_ids and record.get("validation", {}).get("status") == "fail"
+    ]
+    cross_gate_failure_count = sum(len(record.get("cross_record_gate_failures") or []) for record in records)
+    diagnostic_source_failure_count = sum(1 for record in records if record.get("source_semantic_status") == "failed")
+    status = "ok"
+    if runtime_error_count or required_gate_failures:
+        status = "needs_attention"
+    return {
+        "status": status,
+        "runtime_error_count": runtime_error_count,
+        "required_gate_failure_count": len(required_gate_failures),
+        "required_gate_failures_by_task": dict(Counter(record.get("task_id") for record in required_gate_failures)),
+        "cross_record_gate_failure_count": cross_gate_failure_count,
+        "diagnostic_source_failure_count": diagnostic_source_failure_count,
     }
 
 

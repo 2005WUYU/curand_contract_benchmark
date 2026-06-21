@@ -38,6 +38,9 @@ def write_csv(path: Path, records: list[dict[str, Any]]) -> None:
         "generator",
         "distribution",
         "diagnostic_component",
+        "source_semantic_status",
+        "source_gate_backend",
+        "source_gate_failures",
         "ordering",
         "N",
         "parameters",
@@ -65,6 +68,7 @@ def write_csv(path: Path, records: list[dict[str, Any]]) -> None:
             row["validation_status"] = validation.get("status")
             row["unsupported_reason"] = validation.get("unsupported_reason")
             row["parameters"] = json.dumps(record.get("parameters", {}), ensure_ascii=False, sort_keys=True)
+            row["source_gate_failures"] = json.dumps(record.get("source_gate_failures", []), ensure_ascii=False)
             row["cross_record_gate_failures"] = json.dumps(record.get("cross_record_gate_failures", []), ensure_ascii=False)
             row["audit_flags"] = json.dumps(record.get("audit_flags", []), ensure_ascii=False)
             writer.writerow(row)
@@ -108,6 +112,9 @@ def write_report(
     for spec in required:
         status = "executed" if spec.task_id in executed_task_ids else "not_run"
         lines.append(f"- `{spec.task_id}`: {status} ({spec.required_by})")
+
+    lines.extend(["", "## Run Health", ""])
+    lines.extend(_run_health_lines(records))
 
     lines.extend(["", "## Capability Matrix", ""])
     device_ext = capability_matrix.get("device_api_extension", {})
@@ -195,12 +202,12 @@ def _distribution_diagnostics(records: list[dict[str, Any]]) -> list[str]:
     lines = [
         "Diagnostic-only rows are excluded from formal speedup claims. They use selected sizes only, so the full record remains in `results.jsonl`/`results.csv` without expanding the main result table.",
         "",
-        "| distribution | N | params | raw_only_gpu_us | transform_only_gpu_us | raw_plus_transform_gpu_us | public_api_gpu_us | validation |",
-        "|---|---:|---|---:|---:|---:|---:|---|",
+        "| distribution | N | params | raw_only_gpu_us | transform_only_gpu_us | raw_plus_transform_gpu_us | public_api_gpu_us | validation | source_gates |",
+        "|---|---:|---|---:|---:|---:|---:|---|---|",
     ]
     for (distribution, n, params), components in sorted(grouped.items()):
         lines.append(
-            "| {distribution} | {n} | {params} | {raw} | {transform} | {combined} | {public} | {validation} |".format(
+            "| {distribution} | {n} | {params} | {raw} | {transform} | {combined} | {public} | {validation} | {source} |".format(
                 distribution=distribution,
                 n=n,
                 params=params,
@@ -209,6 +216,7 @@ def _distribution_diagnostics(records: list[dict[str, Any]]) -> list[str]:
                 combined=_component_time(components.get("raw_plus_transform")),
                 public=_component_time(components.get("public_api")),
                 validation=_component_validation(components),
+                source=_component_source_status(components),
             )
         )
     return lines
@@ -229,6 +237,42 @@ def _component_validation(components: dict[str, dict[str, Any]]) -> str:
     if not failures:
         return "pass"
     return "fail:" + ",".join(failures)
+
+
+def _component_source_status(components: dict[str, dict[str, Any]]) -> str:
+    failures = []
+    for component, record in sorted(components.items()):
+        if record.get("source_semantic_status") != "failed":
+            continue
+        gates = ",".join(record.get("source_gate_failures") or [])
+        failures.append(f"{component}:{gates}")
+    if failures:
+        return "failed:" + ";".join(failures)
+    if any(record.get("source_semantic_status") for record in components.values()):
+        return "passed_known_gates"
+    return ""
+
+
+def _run_health_lines(records: list[dict[str, Any]]) -> list[str]:
+    gate_task_ids = {"G0_BASIC_CONTRACT", "G1_DISTRIBUTION_ROUGH_CHECK", "G2_REPRODUCIBILITY"}
+    runtime_error_count = sum(1 for record in records if "runtime_error" in (record.get("audit_flags") or []))
+    required_gate_failures = [
+        record
+        for record in records
+        if record.get("task_id") in gate_task_ids and record.get("validation", {}).get("status") == "fail"
+    ]
+    status = "needs_attention" if runtime_error_count or required_gate_failures else "ok"
+    lines = [
+        f"- status: `{status}`",
+        f"- runtime errors: `{runtime_error_count}`",
+        f"- required gate failures: `{len(required_gate_failures)}`",
+    ]
+    if required_gate_failures:
+        counts = defaultdict(int)
+        for record in required_gate_failures:
+            counts[str(record.get("task_id"))] += 1
+        lines.append("- required gate failures by task: " + ", ".join(f"`{task}`={count}" for task, count in sorted(counts.items())))
+    return lines
 
 
 def _is_diagnostic(record: dict[str, Any]) -> bool:

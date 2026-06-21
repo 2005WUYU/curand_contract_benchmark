@@ -20,6 +20,19 @@ CURAND_HOST_OUTPUT_BACKEND_GATE_ALIASES = {
     "curand_host_uniform_plus_threshold": "curand_host",
 }
 
+DIAGNOSTIC_FLAGRAND_BACKENDS = {
+    "flagrand_diag_public_api",
+    "flagrand_diag_raw_only",
+    "flagrand_diag_raw_plus_transform",
+    "flagrand_diag_transform_only",
+}
+
+DIAGNOSTIC_DISTRIBUTION_COMPONENTS = {
+    "public_api",
+    "raw_plus_transform",
+    "transform_only",
+}
+
 
 def timed_record(
     ctx: Any,
@@ -219,6 +232,40 @@ def apply_cross_record_gates(records: list[dict[str, Any]]) -> None:
         if failures:
             record["formal_result"] = False
             record["cross_record_gate_failures"] = sorted(set(failures))
+    annotate_diagnostic_source_gates(records, failed_basic, failed_distribution, failed_sequence)
+
+
+def annotate_diagnostic_source_gates(
+    records: list[dict[str, Any]],
+    failed_basic: set[tuple[str, str, str]],
+    failed_distribution: set[tuple[str, str, str]],
+    failed_sequence: set[tuple[str, str]],
+) -> None:
+    for record in records:
+        if record.get("result_role") != "diagnostic":
+            continue
+        if record.get("backend") not in DIAGNOSTIC_FLAGRAND_BACKENDS:
+            continue
+        source_backend = "flagrand_public"
+        generator = str(record.get("generator"))
+        distribution = str(record.get("distribution"))
+        component = str(record.get("diagnostic_component") or "")
+
+        failures: list[str] = []
+        if (source_backend, generator) in failed_sequence:
+            failures.append("G2_REPRODUCIBILITY")
+            add_audit_flag(record, "source_sequence_semantics_gate_failed")
+        if (source_backend, generator, "raw32") in failed_basic:
+            failures.append("G0_BASIC_CONTRACT")
+            add_audit_flag(record, "source_basic_contract_gate_failed")
+        if component in DIAGNOSTIC_DISTRIBUTION_COMPONENTS and (source_backend, generator, distribution) in failed_distribution:
+            failures.append("G1_DISTRIBUTION_ROUGH_CHECK")
+            add_audit_flag(record, "source_distribution_gate_failed")
+
+        source_failures = sorted(set(failures))
+        record["source_gate_backend"] = source_backend
+        record["source_gate_failures"] = source_failures
+        record["source_semantic_status"] = "failed" if source_failures else "passed_known_gates"
 
 
 def canonical_gate_backend(backend: str) -> str:
