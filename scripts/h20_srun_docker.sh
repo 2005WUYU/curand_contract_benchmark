@@ -15,6 +15,10 @@ export INNER_CMD="$*"
 export REPO_ROOT
 export CURAND_CONTRACT_GIT_SHA="${CURAND_CONTRACT_GIT_SHA:-$(git -C "${REPO_ROOT}" rev-parse HEAD 2>/dev/null || true)}"
 export CURAND_CONTRACT_DEVICE_BUILD_DIR="${CURAND_CONTRACT_DEVICE_BUILD_DIR:-/tmp/curand_contract_device_ext_${USER:-user}}"
+export CONTAINER_HOME="${CONTAINER_HOME:-/tmp/curand_contract_home_${USER:-user}}"
+export CONTAINER_XDG_CACHE_HOME="${CONTAINER_XDG_CACHE_HOME:-/tmp/curand_contract_cache_${USER:-user}}"
+export CONTAINER_TRITON_CACHE_DIR="${CONTAINER_TRITON_CACHE_DIR:-${CONTAINER_XDG_CACHE_HOME}/triton}"
+export CONTAINER_TORCH_EXTENSIONS_DIR="${CONTAINER_TORCH_EXTENSIONS_DIR:-${CONTAINER_XDG_CACHE_HOME}/torch_extensions}"
 
 SLURM_PARTITION="${SLURM_PARTITION:-debug}"
 SLURM_NODELIST="${SLURM_NODELIST:-${H20_NODELIST:-}}"
@@ -56,7 +60,7 @@ fi
   --cpus-per-task="${NUM_CPUS}" \
   --mem="${NUM_MEM_MB}M" \
   --time="${TIME_LIMIT}" \
-  --export=ALL,IMAGE,IMAGE_TAR,INNER_CMD,REPO_ROOT,CURAND_CONTRACT_GIT_SHA \
+  --export=ALL,IMAGE,IMAGE_TAR,INNER_CMD,REPO_ROOT,CURAND_CONTRACT_GIT_SHA,CURAND_CONTRACT_DEVICE_BUILD_DIR,CONTAINER_HOME,CONTAINER_XDG_CACHE_HOME,CONTAINER_TRITON_CACHE_DIR,CONTAINER_TORCH_EXTENSIONS_DIR \
   bash -lc '
     set -euo pipefail
     echo "[h20] node=$(hostname) step_gpus=${SLURM_STEP_GPUS:-unset}"
@@ -108,6 +112,11 @@ fi
       -e CUDA_VISIBLE_DEVICES="${SLURM_STEP_GPUS:-0}" \
       -e CURAND_CONTRACT_GIT_SHA="${CURAND_CONTRACT_GIT_SHA:-}" \
       -e CURAND_CONTRACT_DEVICE_BUILD_DIR="${CURAND_CONTRACT_DEVICE_BUILD_DIR}" \
+      -e HOME="${CONTAINER_HOME}" \
+      -e XDG_CACHE_HOME="${CONTAINER_XDG_CACHE_HOME}" \
+      -e TRITON_CACHE_DIR="${CONTAINER_TRITON_CACHE_DIR}" \
+      -e TORCH_EXTENSIONS_DIR="${CONTAINER_TORCH_EXTENSIONS_DIR}" \
+      -e INNER_CMD="${INNER_CMD}" \
       -e MATHDX_ROOT="${MATHDX_ROOT:-}" \
       -e CPATH="${CPATH:-}" \
       -e CPLUS_INCLUDE_PATH="${CPLUS_INCLUDE_PATH:-}" \
@@ -116,7 +125,13 @@ fi
       -v "${HOST_RESULTS_SPOOL}":/workspace/results \
       -w /workspace \
       "${IMAGE}" \
-      bash -lc "${INNER_CMD}"
+      bash -lc '"'"'
+        set -euo pipefail
+        mkdir -p "${HOME}" "${XDG_CACHE_HOME}" "${TRITON_CACHE_DIR}" "${TORCH_EXTENSIONS_DIR}" "${CURAND_CONTRACT_DEVICE_BUILD_DIR}"
+        test -w "${TRITON_CACHE_DIR}"
+        echo "[h20] triton_cache=${TRITON_CACHE_DIR}"
+        bash -lc "${INNER_CMD}"
+      '"'"'
     docker_rc=$?
     set -e
 

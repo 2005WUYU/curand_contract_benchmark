@@ -207,12 +207,25 @@ bash scripts/h20_benchmark.sh
 ```text
 results/<timestamp>_h20_parallel_<N>gpu/
   parallel_manifest.json
+  summary.json
   shard_*.log
   shard_*_gpu_*/
   results.jsonl
   results.csv
   REPORT.md
 ```
+
+脚本会在容器里设置可写缓存目录，避免 Triton fallback 到 `/.triton`：
+
+```text
+HOME=/tmp/curand_contract_home_$USER
+XDG_CACHE_HOME=/tmp/curand_contract_cache_$USER
+TRITON_CACHE_DIR=/tmp/curand_contract_cache_$USER/triton
+TORCH_EXTENSIONS_DIR=/tmp/curand_contract_cache_$USER/torch_extensions
+```
+
+多卡并行时，每个 shard 会使用独立的 `TRITON_CACHE_DIR`。如果任何 shard 进程返回非零，
+launcher 会尽量聚合已有输出、写出 `summary.json` 和 `REPORT.md`，然后整体返回非零。
 
 注意：不要只在 Slurm 层多申请 GPU 却仍单进程跑，那只会多占卡不会变快。本脚本在 `NUM_GPUS>1` 时会自动并行分片。
 
@@ -228,9 +241,13 @@ CPUS_PER_GPU      smoke 默认 8，benchmark 默认 24
 MEM_PER_GPU_MB    smoke 默认 32768，benchmark 默认 242144
 IMAGE             默认 flagtree-nvidia:3.6-v2
 IMAGE_TAR         默认 /data/nfs3/flagtree-nvidia-3.6-v2.tar
+H20_NODELIST      可选，指定已有目标镜像/环境的 H20 节点
 PROFILE           默认 h20
 GROUPS            默认 all；也支持 BENCHMARK_GROUPS，避免和 Bash 特殊变量重名
 BUILD_DEVICE_EXT  1 表示先尝试构建 native cuRAND Device API extension
+ALLOW_DEVICE_EXT_FAILURE  默认 1；设为 0 时 Device API extension 构建失败会直接终止
+MATHDX_ROOT / CPATH / CMAKE_PREFIX_PATH  传给容器内 cuRANDDx header 检测与后续构建
+CONTAINER_XDG_CACHE_HOME / CONTAINER_TRITON_CACHE_DIR  可选，覆盖容器内缓存目录
 ```
 
 ## 6. 手写 srun 命令时的等价写法
@@ -259,6 +276,7 @@ srun -p debug --gres=gpu:1 --cpus-per-task=8 --mem=32G --time=01:00:00 bash -lc 
 results/<timestamp>_<profile>/
   environment.json
   capability_matrix.json
+  summary.json
   task_registry.json
   results.jsonl
   results.csv
@@ -272,6 +290,9 @@ REPORT.md
 results.jsonl
 capability_matrix.json
 ```
+
+只要 `summary.json` 中 `run_health.status` 不是 `ok`，或 `status_counts.fail` 非 0，
+这轮就不能作为成功 benchmark 使用。
 
 ## 8. 如何判断结果
 
@@ -423,3 +444,10 @@ SLURM_PARTITION=debug GROUPS=stage0,stage1 BUILD_DEVICE_EXT=0 bash scripts/h20_b
 ```
 
 Device/Dx 缺失会作为 unsupported 记录，不能把这些行当成性能结论。
+
+legacy Device API extension 构建脚本默认清理旧 build dir 后重建，避免不同 CUDA runtime
+产物串用。需要调试增量构建时才使用：
+
+```bash
+python native/build_curand_device_extension.py --verbose --no-clean
+```

@@ -89,6 +89,7 @@ def write_report(
     environment: dict[str, Any],
     capability_matrix: dict[str, Any],
     h20_reference: dict[str, Any] | None,
+    run_summary: dict[str, Any] | None = None,
 ) -> None:
     by_task: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for record in records:
@@ -117,7 +118,10 @@ def write_report(
         lines.append(f"- `{spec.task_id}`: {status} ({spec.required_by})")
 
     lines.extend(["", "## Run Health", ""])
-    lines.extend(_run_health_lines(records))
+    if run_summary is not None:
+        lines.extend(_run_health_summary_lines(run_summary))
+    else:
+        lines.extend(_run_health_lines(records))
 
     semantic_lines = _semantic_notes(records)
     if semantic_lines:
@@ -305,6 +309,7 @@ def _component_source_status(components: dict[str, dict[str, Any]]) -> str:
 
 def _run_health_lines(records: list[dict[str, Any]]) -> list[str]:
     gate_task_ids = {"G0_BASIC_CONTRACT", "G1_DISTRIBUTION_ROUGH_CHECK", "G2_REPRODUCIBILITY"}
+    validation_fail_count = sum(1 for record in records if record.get("validation", {}).get("status") == "fail")
     runtime_error_count = sum(1 for record in records if "runtime_error" in (record.get("audit_flags") or []))
     formal_gate_leak_count = sum(1 for record in records if record.get("formal_result") and _has_gate_failure(record))
     required_gate_failures = [
@@ -312,25 +317,41 @@ def _run_health_lines(records: list[dict[str, Any]]) -> list[str]:
         for record in records
         if record.get("task_id") in gate_task_ids and record.get("validation", {}).get("status") == "fail"
     ]
-    if runtime_error_count or formal_gate_leak_count:
+    if validation_fail_count or runtime_error_count or formal_gate_leak_count:
         status = "needs_attention"
-    elif required_gate_failures:
-        status = "usable_with_gated_failures"
     else:
         status = "ok"
     lines = [
         f"- status: `{status}`",
+        f"- validation failures: `{validation_fail_count}`",
         f"- runtime errors: `{runtime_error_count}`",
         f"- formal gate leaks: `{formal_gate_leak_count}`",
         f"- required gate failures: `{len(required_gate_failures)}`",
     ]
-    if status == "usable_with_gated_failures":
-        lines.append("- interpretation: required gates failed for some implementations, but affected downstream formal results were gated off.")
     if required_gate_failures:
         counts = defaultdict(int)
         for record in required_gate_failures:
             counts[str(record.get("task_id"))] += 1
         lines.append("- required gate failures by task: " + ", ".join(f"`{task}`={count}" for task, count in sorted(counts.items())))
+    return lines
+
+
+def _run_health_summary_lines(summary: dict[str, Any]) -> list[str]:
+    run_health = summary.get("run_health") or {}
+    lines = [
+        f"- status: `{run_health.get('status')}`",
+        f"- validation failures: `{run_health.get('validation_fail_count', 0)}`",
+        f"- runtime errors: `{run_health.get('runtime_error_count', 0)}`",
+        f"- formal gate leaks: `{run_health.get('formal_gate_leak_count', 0)}`",
+        f"- required gate failures: `{run_health.get('required_gate_failure_count', 0)}`",
+        f"- shard process failures: `{run_health.get('shard_process_failure_count', 0)}`",
+    ]
+    failures_by_task = run_health.get("required_gate_failures_by_task") or {}
+    if failures_by_task:
+        lines.append("- required gate failures by task: " + ", ".join(f"`{task}`={count}" for task, count in sorted(failures_by_task.items())))
+    shard_failures = run_health.get("shard_process_failures") or []
+    for failure in shard_failures:
+        lines.append(f"- shard failure: {failure}")
     return lines
 
 

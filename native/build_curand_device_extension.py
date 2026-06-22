@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import os
 from pathlib import Path
+import shutil
 
 from torch.utils.cpp_extension import load
 
@@ -17,12 +18,21 @@ def parse_args() -> argparse.Namespace:
         )
     )
     parser.add_argument("--build-dir", type=Path, default=default_build_dir)
+    parser.add_argument(
+        "--no-clean",
+        dest="clean",
+        action="store_false",
+        help="Reuse an existing build directory instead of forcing a rebuild.",
+    )
+    parser.set_defaults(clean=True)
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
     root = Path(__file__).resolve().parent
+    if args.clean and args.build_dir.exists():
+        shutil.rmtree(args.build_dir)
     args.build_dir.mkdir(parents=True, exist_ok=True)
     module = load(
         name="curand_contract_device_ext",

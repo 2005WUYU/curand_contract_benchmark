@@ -5,8 +5,6 @@ import sys
 import time
 from pathlib import Path
 
-import torch
-
 
 REPO_ROOT = Path(__file__).resolve().parent
 LOCAL_SRC_ROOT = REPO_ROOT / "src"
@@ -14,6 +12,13 @@ for path in (REPO_ROOT, LOCAL_SRC_ROOT):
     text = str(path)
     if path.exists() and text not in sys.path:
         sys.path.insert(0, text)
+
+from contract_benchmark.runtime_env import configure_writable_cache  # noqa: E402
+
+
+RUNTIME_CACHE_ENV = configure_writable_cache(REPO_ROOT)
+
+import torch  # noqa: E402
 
 from contract_benchmark.reporting import (  # noqa: E402
     make_run_dir,
@@ -30,7 +35,7 @@ from contract_benchmark.runner import (  # noqa: E402
     run_specs,
 )
 from contract_benchmark.spec import build_task_specs, specs_for_groups  # noqa: E402
-from contract_benchmark.summary import write_summary  # noqa: E402
+from contract_benchmark.summary import summarize_records  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
@@ -90,13 +95,15 @@ def main() -> int:
         "ended_unix": run_ended_unix,
         "elapsed_seconds": run_ended_unix - run_started_unix,
     }
+    environment["runtime_cache"] = RUNTIME_CACHE_ENV
+    summary = summarize_records(records, capability_matrix=cap_matrix, environment=environment)
 
     write_json(results_dir / "environment.json", environment)
     write_json(results_dir / "capability_matrix.json", cap_matrix)
     write_task_registry(results_dir / "task_registry.json", selected_specs)
     write_jsonl(results_dir / "results.jsonl", records)
     write_csv(results_dir / "results.csv", records)
-    write_summary(results_dir / "summary.json", records=records, capability_matrix=cap_matrix, environment=environment)
+    write_json(results_dir / "summary.json", summary)
     write_report(
         results_dir / "REPORT.md",
         records=records,
@@ -104,6 +111,7 @@ def main() -> int:
         environment=environment,
         capability_matrix=cap_matrix,
         h20_reference=h20_reference,
+        run_summary=summary,
     )
 
     pass_count = sum(1 for r in records if r.get("validation", {}).get("status") == "pass")
@@ -111,11 +119,36 @@ def main() -> int:
     unsupported_count = sum(1 for r in records if r.get("validation", {}).get("status") == "unsupported")
     print(
         f"[contract-benchmark] records={len(records)} pass={pass_count} "
-        f"fail={fail_count} unsupported={unsupported_count}"
+        f"fail={fail_count} unsupported={unsupported_count} "
+        f"health={summary.get('run_health', {}).get('status')}"
     )
+    _print_run_health_issues(summary)
     print(f"[contract-benchmark] elapsed_seconds={run_ended_unix - run_started_unix:.3f}")
     print(f"[contract-benchmark] report: {results_dir / 'REPORT.md'}")
-    return 0
+    return 0 if _summary_exit_ok(summary) else 1
+
+
+def _summary_exit_ok(summary: dict[str, object]) -> bool:
+    status_counts = summary.get("status_counts")
+    run_health = summary.get("run_health")
+    fail_count = int(status_counts.get("fail", 0)) if isinstance(status_counts, dict) else 0
+    health_status = run_health.get("status") if isinstance(run_health, dict) else None
+    return fail_count == 0 and health_status == "ok"
+
+
+def _print_run_health_issues(summary: dict[str, object]) -> None:
+    run_health = summary.get("run_health")
+    if not isinstance(run_health, dict):
+        return
+    for key in (
+        "runtime_error_count",
+        "required_gate_failure_count",
+        "formal_gate_leak_count",
+        "shard_process_failure_count",
+    ):
+        value = int(run_health.get(key, 0) or 0)
+        if value:
+            print(f"[contract-benchmark] issue: {key}={value}", file=sys.stderr)
 
 
 def _load_h20_reference(path: Path) -> dict[str, str] | None:

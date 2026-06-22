@@ -89,6 +89,10 @@ curand_contract_benchmark/results/<timestamp>_<profile>/
 - `REPORT.md`：人读报告。
 - `results.jsonl`：逐行审计，保留 claim、observability class、timing boundary、validation、audit flags 和 unsupported reason。
 
+`run_benchmark.py` 和多卡 launcher 会把 `summary.json.run_health.status != "ok"` 或任意
+`validation.status=fail` 视为失败运行并返回非零退出码。`unsupported` 行仍然只是显式能力缺失，
+不能当作性能结论。
+
 代码结构说明见：
 
 ```text
