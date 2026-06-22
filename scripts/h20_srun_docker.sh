@@ -72,9 +72,31 @@ fi
       exit 125
     fi
 
+    prepare_result_target() {
+      local candidate="$1"
+      local probe="${candidate}/.write_probe_${SLURM_JOB_ID:-$$}"
+      mkdir -p "${candidate}" 2>/dev/null || return 1
+      touch "${probe}" 2>/dev/null || return 1
+      rm -f "${probe}" 2>/dev/null || true
+      return 0
+    }
+
     HOST_RESULTS_SPOOL="$(mktemp -d "${TMPDIR:-/tmp}/curand_contract_results_${USER:-user}_XXXXXX")"
-    HOST_RESULTS_TARGET="${REPO_ROOT}/results"
-    mkdir -p "${HOST_RESULTS_TARGET}"
+    HOST_RESULTS_TARGET="${H20_RESULTS_TARGET:-${REPO_ROOT}/results}"
+    if ! prepare_result_target "${HOST_RESULTS_TARGET}"; then
+      REQUESTED_RESULTS_TARGET="${HOST_RESULTS_TARGET}"
+      HOST_RESULTS_TARGET="${REPO_ROOT}/h20_results"
+      echo "[h20] result_target_unwritable=${REQUESTED_RESULTS_TARGET}; falling back to ${HOST_RESULTS_TARGET}" >&2
+      if ! prepare_result_target "${HOST_RESULTS_TARGET}"; then
+        REQUESTED_RESULTS_TARGET="${HOST_RESULTS_TARGET}"
+        HOST_RESULTS_TARGET="${HOME:-/tmp}/curand_contract_benchmark_results"
+        echo "[h20] result_target_unwritable=${REQUESTED_RESULTS_TARGET}; falling back to ${HOST_RESULTS_TARGET}" >&2
+        if ! prepare_result_target "${HOST_RESULTS_TARGET}"; then
+          echo "[h20] no writable result target found; set H20_RESULTS_TARGET to a writable directory" >&2
+          exit 126
+        fi
+      fi
+    fi
     echo "[h20] result_spool=${HOST_RESULTS_SPOOL}"
     echo "[h20] result_target=${HOST_RESULTS_TARGET}"
 
@@ -98,7 +120,12 @@ fi
     docker_rc=$?
     set -e
 
-    cp -a "${HOST_RESULTS_SPOOL}/." "${HOST_RESULTS_TARGET}/"
-    echo "[h20] copied results from ${HOST_RESULTS_SPOOL} to ${HOST_RESULTS_TARGET}"
+    if cp -R "${HOST_RESULTS_SPOOL}/." "${HOST_RESULTS_TARGET}/"; then
+      echo "[h20] copied results from ${HOST_RESULTS_SPOOL} to ${HOST_RESULTS_TARGET}"
+    else
+      copy_rc=$?
+      echo "[h20] failed to copy results from ${HOST_RESULTS_SPOOL} to ${HOST_RESULTS_TARGET}" >&2
+      exit "${copy_rc}"
+    fi
     exit "${docker_rc}"
   '

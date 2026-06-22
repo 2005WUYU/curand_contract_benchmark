@@ -152,6 +152,8 @@ launcher 会用提交任务用户的 UID/GID 运行容器，避免 NFS/root-squa
 `/workspace/results`。
 如果容器仍无法直接写仓库挂载，launcher 会把 `/workspace/results` 单独挂到计算节点
 `/tmp` spool 目录，Docker 结束后再由外层 Slurm shell 复制回仓库 `results/`。
+如果仓库 `results/` 本身不可写，launcher 会自动退到 `h20_results/`，再退到
+`$HOME/curand_contract_benchmark_results`；也可以显式设置 `H20_RESULTS_TARGET`。
 
 ### 5.2 分阶段正式跑
 
