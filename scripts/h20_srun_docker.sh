@@ -15,6 +15,7 @@ export INNER_CMD="$*"
 export REPO_ROOT
 export CURAND_CONTRACT_GIT_SHA="${CURAND_CONTRACT_GIT_SHA:-$(git -C "${REPO_ROOT}" rev-parse HEAD 2>/dev/null || true)}"
 export CURAND_CONTRACT_DEVICE_BUILD_DIR="${CURAND_CONTRACT_DEVICE_BUILD_DIR:-/tmp/curand_contract_device_ext_${USER:-user}}"
+export CURAND_CONTRACT_CURANDDX_BUILD_DIR="${CURAND_CONTRACT_CURANDDX_BUILD_DIR:-/tmp/curand_contract_curanddx_ext_${USER:-user}}"
 export CONTAINER_HOME="${CONTAINER_HOME:-/tmp/curand_contract_home_${USER:-user}}"
 export CONTAINER_XDG_CACHE_HOME="${CONTAINER_XDG_CACHE_HOME:-/tmp/curand_contract_cache_${USER:-user}}"
 export CONTAINER_TRITON_CACHE_DIR="${CONTAINER_TRITON_CACHE_DIR:-${CONTAINER_XDG_CACHE_HOME}/triton}"
@@ -40,6 +41,7 @@ echo "[h20] image_tar=${IMAGE_TAR}"
 echo "[h20] repo=${REPO_ROOT}"
 echo "[h20] git_sha=${CURAND_CONTRACT_GIT_SHA:-unknown}"
 echo "[h20] device_build_dir=${CURAND_CONTRACT_DEVICE_BUILD_DIR}"
+echo "[h20] curanddx_build_dir=${CURAND_CONTRACT_CURANDDX_BUILD_DIR}"
 echo "[h20] inner_cmd=${INNER_CMD}"
 
 if [ "${DRY_RUN:-0}" = "1" ]; then
@@ -47,6 +49,10 @@ if [ "${DRY_RUN:-0}" = "1" ]; then
   exit 0
 fi
 
+SLURM_EXPORTS="ALL,IMAGE,IMAGE_TAR,INNER_CMD,REPO_ROOT,CURAND_CONTRACT_GIT_SHA"
+SLURM_EXPORTS="${SLURM_EXPORTS},CURAND_CONTRACT_DEVICE_BUILD_DIR,CURAND_CONTRACT_CURANDDX_BUILD_DIR"
+SLURM_EXPORTS="${SLURM_EXPORTS},CONTAINER_HOME,CONTAINER_XDG_CACHE_HOME"
+SLURM_EXPORTS="${SLURM_EXPORTS},CONTAINER_TRITON_CACHE_DIR,CONTAINER_TORCH_EXTENSIONS_DIR"
 SRUN_CMD=(srun -p "${SLURM_PARTITION}")
 if [ -n "${SLURM_NODELIST}" ]; then
   SRUN_CMD+=(--nodelist="${SLURM_NODELIST}")
@@ -60,7 +66,7 @@ fi
   --cpus-per-task="${NUM_CPUS}" \
   --mem="${NUM_MEM_MB}M" \
   --time="${TIME_LIMIT}" \
-  --export=ALL,IMAGE,IMAGE_TAR,INNER_CMD,REPO_ROOT,CURAND_CONTRACT_GIT_SHA,CURAND_CONTRACT_DEVICE_BUILD_DIR,CONTAINER_HOME,CONTAINER_XDG_CACHE_HOME,CONTAINER_TRITON_CACHE_DIR,CONTAINER_TORCH_EXTENSIONS_DIR \
+  --export="${SLURM_EXPORTS}" \
   bash -lc '
     set -euo pipefail
     echo "[h20] node=$(hostname) step_gpus=${SLURM_STEP_GPUS:-unset}"
@@ -112,6 +118,7 @@ fi
       -e CUDA_VISIBLE_DEVICES="${SLURM_STEP_GPUS:-0}" \
       -e CURAND_CONTRACT_GIT_SHA="${CURAND_CONTRACT_GIT_SHA:-}" \
       -e CURAND_CONTRACT_DEVICE_BUILD_DIR="${CURAND_CONTRACT_DEVICE_BUILD_DIR}" \
+      -e CURAND_CONTRACT_CURANDDX_BUILD_DIR="${CURAND_CONTRACT_CURANDDX_BUILD_DIR}" \
       -e HOME="${CONTAINER_HOME}" \
       -e XDG_CACHE_HOME="${CONTAINER_XDG_CACHE_HOME}" \
       -e TRITON_CACHE_DIR="${CONTAINER_TRITON_CACHE_DIR}" \
@@ -127,7 +134,13 @@ fi
       "${IMAGE}" \
       bash -lc '"'"'
         set -euo pipefail
-        mkdir -p "${HOME}" "${XDG_CACHE_HOME}" "${TRITON_CACHE_DIR}" "${TORCH_EXTENSIONS_DIR}" "${CURAND_CONTRACT_DEVICE_BUILD_DIR}"
+        mkdir -p \
+          "${HOME}" \
+          "${XDG_CACHE_HOME}" \
+          "${TRITON_CACHE_DIR}" \
+          "${TORCH_EXTENSIONS_DIR}" \
+          "${CURAND_CONTRACT_DEVICE_BUILD_DIR}" \
+          "${CURAND_CONTRACT_CURANDDX_BUILD_DIR}"
         test -w "${TRITON_CACHE_DIR}"
         echo "[h20] triton_cache=${TRITON_CACHE_DIR}"
         bash -lc "${INNER_CMD}"

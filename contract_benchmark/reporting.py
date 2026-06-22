@@ -137,6 +137,12 @@ def write_report(
     lines.append(f"- cuRANDDx: `{_support_state(curanddx)}`")
     if curanddx.get("headers_available") is not None:
         lines.append(f"  headers_available: `{curanddx.get('headers_available')}`")
+    if curanddx.get("extension_available") is not None:
+        lines.append(f"  extension_available: `{curanddx.get('extension_available')}`")
+    if curanddx.get("extension_build_dir"):
+        lines.append(f"  extension_build_dir: `{curanddx.get('extension_build_dir')}`")
+    if curanddx.get("extension_symbols"):
+        lines.append(f"  extension_symbols: `{curanddx.get('extension_symbols')}`")
     if curanddx.get("header_paths"):
         lines.append(f"  headers: `{', '.join(str(path) for path in curanddx.get('header_paths', []))}`")
     if curanddx.get("unsupported_reason"):

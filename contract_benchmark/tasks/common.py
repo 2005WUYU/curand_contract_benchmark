@@ -228,25 +228,18 @@ def device_fused_rows(
             rows.extend(run_legacy_device_fused_extension(ctx, spec, ext, n=n, distribution=distribution, parameters=parameters, comparison_key=f"{comparison_key}:legacy_device"))
         except BaseException as exc:
             rows.append(error_record(ctx, spec, "curand_legacy_device_fused", exc, generator="philox4x32_10", distribution=distribution, n=n, parameters=parameters))
-    rows.append(
-        unsupported_record(
-            ctx,
-            spec,
-            "curanddx_fused",
-            cap.get("curanddx", {}).get("unsupported_reason") or "cuRANDDx unavailable",
-            generator="philox4x32_10",
-            distribution=distribution,
-            n=n,
-            parameters=parameters,
-            comparison_key=comparison_key,
-            baseline_id="curanddx_fused",
-        )
-    )
+    from contract_benchmark.tasks.curanddx import run_curanddx_fused_extension
+
+    rows.extend(run_curanddx_fused_extension(ctx, spec, n=n, distribution=distribution, parameters=parameters, comparison_key=f"{comparison_key}:curanddx"))
     return rows
 
 
 def has_legacy_device_baseline(rows: list[dict[str, Any]]) -> bool:
-    return any(row.get("backend") == "curand_legacy_device_fused" and row.get("is_baseline") for row in rows)
+    return has_backend_baseline(rows, "curand_legacy_device_fused")
+
+
+def has_backend_baseline(rows: list[dict[str, Any]], backend: str) -> bool:
+    return any(row.get("backend") == backend and row.get("is_baseline") for row in rows)
 
 
 def alternate_baseline_record(record: dict[str, Any], comparison_key: str, baseline_id: str) -> dict[str, Any]:

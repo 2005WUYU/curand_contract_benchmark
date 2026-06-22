@@ -9,7 +9,7 @@ from contract_benchmark.adapters import make_curand_generator
 from contract_benchmark.profiles import BenchmarkContext
 from contract_benchmark.records import timed_record
 from contract_benchmark.spec import TaskSpec
-from contract_benchmark.tasks.common import adjust_n, alternate_baseline_record, device_fused_rows, has_legacy_device_baseline, merge_validations, validate_after
+from contract_benchmark.tasks.common import adjust_n, alternate_baseline_record, device_fused_rows, has_backend_baseline, has_legacy_device_baseline, merge_validations, validate_after
 from contract_benchmark.timing import collect_cuda_event_and_wall_us
 from contract_benchmark.validation import validate_finite_output, validate_mask
 
@@ -41,6 +41,8 @@ def run_threshold(ctx: BenchmarkContext, spec: TaskSpec) -> list[dict[str, Any]]
             records.extend(device_rows)
             if has_legacy_device_baseline(device_rows):
                 records.append(alternate_baseline_record(flagrand_record, f"{comparison_key}:legacy_device", "curand_legacy_device_fused"))
+            if has_backend_baseline(device_rows, "curanddx_fused"):
+                records.append(alternate_baseline_record(flagrand_record, f"{comparison_key}:curanddx", "curanddx_fused"))
     return records
 
 
@@ -73,6 +75,8 @@ def run_add_uniform(ctx: BenchmarkContext, spec: TaskSpec, *, task_override: str
             records.extend(device_rows)
             if has_legacy_device_baseline(device_rows):
                 records.append(alternate_baseline_record(rec, f"{task_id}:{n}:legacy_device", "curand_legacy_device_fused"))
+            if has_backend_baseline(device_rows, "curanddx_fused"):
+                records.append(alternate_baseline_record(rec, f"{task_id}:{n}:curanddx", "curanddx_fused"))
     return records
 
 
@@ -106,4 +110,6 @@ def run_dropout(ctx: BenchmarkContext, spec: TaskSpec) -> list[dict[str, Any]]:
             records.extend(device_rows)
             if has_legacy_device_baseline(device_rows):
                 records.append(alternate_baseline_record(flagrand_record, f"{comparison_key}:legacy_device", "curand_legacy_device_fused"))
+            if has_backend_baseline(device_rows, "curanddx_fused"):
+                records.append(alternate_baseline_record(flagrand_record, f"{comparison_key}:curanddx", "curanddx_fused"))
     return records

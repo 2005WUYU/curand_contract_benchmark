@@ -38,6 +38,8 @@ curand_contract_benchmark/
   native/
     curand_contract_device_ext.cu
     build_curand_device_extension.py
+    curanddx_contract_ext.cu
+    build_curanddx_extension.py
   docs/
     BENCHMARK_STRUCTURE_AND_IMPLEMENTATION.md
 ```
@@ -58,7 +60,9 @@ curand_contract_benchmark/
 
 `kernels.py` 提供消费 kernel 和 fused Philox/Triton kernel，用于 F0/F1/F2/M0/M1 控制任务。
 
-`native/` 提供 legacy cuRAND Device API fused extension。Windows 本机未必能构建；H20/Linux 上可构建后作为设备端 fused baseline。
+`native/` 提供 legacy cuRAND Device API fused extension，以及 cuRANDDx Philox extension。
+Windows 本机未必能构建；H20/Linux 上可构建后作为设备端 fused baseline。
+cuRANDDx extension 覆盖 Philox raw32、uniform_f32、uniform threshold、add-uniform consume 和 dropout。
 
 ## 3. 任务体系
 

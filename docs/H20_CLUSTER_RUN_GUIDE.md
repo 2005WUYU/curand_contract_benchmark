@@ -143,11 +143,15 @@ CPATH=/opt/mathdx/current/include/curanddx:/opt/mathdx/current/include \
 bash scripts/h20_benchmark.sh
 ```
 
-`capability_matrix.json` 和 `REPORT.md` 会记录 cuRANDDx headers 是否在容器内被找到。
+`capability_matrix.json` 和 `REPORT.md` 会记录 cuRANDDx headers 是否在容器内被找到、
+cuRANDDx extension 是否成功 import、构建目录和导出的符号。
 Docker 镜像是节点本地资源；如果镜像只在特定节点上存在，需要设置
 `H20_NODELIST`/`SLURM_NODELIST`，或者设置 `IMAGE_TAR` 为真正包含该镜像 tag 的 tar 包。
 legacy cuRAND Device API extension 默认构建到容器内 `/tmp/curand_contract_device_ext_$USER`；
 如需覆盖可设置 `CURAND_CONTRACT_DEVICE_BUILD_DIR`，不要依赖挂载仓库内的 `native/build` 可写。
+cuRANDDx extension 默认构建到容器内 `/tmp/curand_contract_curanddx_ext_$USER`；
+如需覆盖可设置 `CURAND_CONTRACT_CURANDDX_BUILD_DIR`。它需要 MathDx/cuRANDDx headers，
+通常由 `MATHDX_ROOT=/opt/mathdx/current` 和对应 `CPATH` 提供。
 launcher 会用提交任务用户的 UID/GID 运行容器，避免 NFS/root-squash 环境下无法写
 `/workspace/results`。
 如果容器仍无法直接写仓库挂载，launcher 会把 `/workspace/results` 单独挂到计算节点
@@ -246,6 +250,8 @@ PROFILE           默认 h20
 GROUPS            默认 all；也支持 BENCHMARK_GROUPS，避免和 Bash 特殊变量重名
 BUILD_DEVICE_EXT  1 表示先尝试构建 native cuRAND Device API extension
 ALLOW_DEVICE_EXT_FAILURE  默认 1；设为 0 时 Device API extension 构建失败会直接终止
+BUILD_CURANDDX_EXT  默认 1，表示先尝试构建 native cuRANDDx extension
+ALLOW_CURANDDX_EXT_FAILURE  默认跟随 ALLOW_DEVICE_EXT_FAILURE；设为 0 时 cuRANDDx extension 构建失败会直接终止
 MATHDX_ROOT / CPATH / CMAKE_PREFIX_PATH  传给容器内 cuRANDDx header 检测与后续构建
 CONTAINER_XDG_CACHE_HOME / CONTAINER_TRITON_CACHE_DIR  可选，覆盖容器内缓存目录
 ```

@@ -10,6 +10,7 @@ export MEM_PER_GPU_MB="${MEM_PER_GPU_MB:-242144}"
 export TIME_LIMIT="${TIME_LIMIT:-08:00:00}"
 export JOB_NAME="${JOB_NAME:-curand-h20-benchmark}"
 export CURAND_CONTRACT_DEVICE_BUILD_DIR="${CURAND_CONTRACT_DEVICE_BUILD_DIR:-/tmp/curand_contract_device_ext_${USER:-user}}"
+export CURAND_CONTRACT_CURANDDX_BUILD_DIR="${CURAND_CONTRACT_CURANDDX_BUILD_DIR:-/tmp/curand_contract_curanddx_ext_${USER:-user}}"
 
 PROFILE="${PROFILE:-h20}"
 GROUPS_FROM_ENV="$(printenv GROUPS || true)"
@@ -20,6 +21,8 @@ if [[ "${BENCHMARK_GROUPS}" =~ ^[0-9[:space:]]+$ ]]; then
 fi
 BUILD_DEVICE_EXT="${BUILD_DEVICE_EXT:-1}"
 ALLOW_DEVICE_EXT_FAILURE="${ALLOW_DEVICE_EXT_FAILURE:-1}"
+BUILD_CURANDDX_EXT="${BUILD_CURANDDX_EXT:-1}"
+ALLOW_CURANDDX_EXT_FAILURE="${ALLOW_CURANDDX_EXT_FAILURE:-${ALLOW_DEVICE_EXT_FAILURE}}"
 
 if [ "${NUM_GPUS}" -gt 1 ]; then
   CMD="python scripts/h20_parallel_benchmark.py --profile ${PROFILE} --groups ${BENCHMARK_GROUPS} --num-gpus ${NUM_GPUS}"
@@ -27,12 +30,21 @@ else
   CMD="python run_benchmark.py --profile ${PROFILE} --groups ${BENCHMARK_GROUPS}"
 fi
 
+PREFIX_CMD=""
 if [ "${BUILD_DEVICE_EXT}" = "1" ]; then
   if [ "${ALLOW_DEVICE_EXT_FAILURE}" = "1" ]; then
-    CMD="(python native/build_curand_device_extension.py --verbose || true) && ${CMD}"
+    PREFIX_CMD="${PREFIX_CMD}(python native/build_curand_device_extension.py --verbose || true) && "
   else
-    CMD="python native/build_curand_device_extension.py --verbose && ${CMD}"
+    PREFIX_CMD="${PREFIX_CMD}python native/build_curand_device_extension.py --verbose && "
   fi
 fi
+if [ "${BUILD_CURANDDX_EXT}" = "1" ]; then
+  if [ "${ALLOW_CURANDDX_EXT_FAILURE}" = "1" ]; then
+    PREFIX_CMD="${PREFIX_CMD}(python native/build_curanddx_extension.py --verbose || true) && "
+  else
+    PREFIX_CMD="${PREFIX_CMD}python native/build_curanddx_extension.py --verbose && "
+  fi
+fi
+CMD="${PREFIX_CMD}${CMD}"
 
 exec "${SCRIPT_DIR}/h20_srun_docker.sh" "${CMD}"

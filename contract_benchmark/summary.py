@@ -205,6 +205,8 @@ def _capability_support(row: dict[str, Any]) -> dict[str, Any]:
         "headers_available": row.get("headers_available"),
         "header_paths": row.get("header_paths"),
         "extension_available": row.get("extension_available"),
+        "extension_build_dir": row.get("extension_build_dir"),
+        "extension_symbols": row.get("extension_symbols"),
         "unsupported_reason": row.get("unsupported_reason"),
     }
 
