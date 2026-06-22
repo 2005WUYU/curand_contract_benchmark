@@ -72,6 +72,13 @@ fi
       exit 125
     fi
 
+    HOST_RESULTS_SPOOL="$(mktemp -d "${TMPDIR:-/tmp}/curand_contract_results_${USER:-user}_XXXXXX")"
+    HOST_RESULTS_TARGET="${REPO_ROOT}/results"
+    mkdir -p "${HOST_RESULTS_TARGET}"
+    echo "[h20] result_spool=${HOST_RESULTS_SPOOL}"
+    echo "[h20] result_target=${HOST_RESULTS_TARGET}"
+
+    set +e
     docker run --rm \
       --gpus all \
       --shm-size=16g \
@@ -84,7 +91,14 @@ fi
       -e CPLUS_INCLUDE_PATH="${CPLUS_INCLUDE_PATH:-}" \
       -e CMAKE_PREFIX_PATH="${CMAKE_PREFIX_PATH:-}" \
       -v "${REPO_ROOT}":/workspace \
+      -v "${HOST_RESULTS_SPOOL}":/workspace/results \
       -w /workspace \
       "${IMAGE}" \
       bash -lc "${INNER_CMD}"
+    docker_rc=$?
+    set -e
+
+    cp -a "${HOST_RESULTS_SPOOL}/." "${HOST_RESULTS_TARGET}/"
+    echo "[h20] copied results from ${HOST_RESULTS_SPOOL} to ${HOST_RESULTS_TARGET}"
+    exit "${docker_rc}"
   '

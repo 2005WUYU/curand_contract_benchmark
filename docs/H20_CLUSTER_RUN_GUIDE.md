@@ -150,6 +150,8 @@ legacy cuRAND Device API extension 默认构建到容器内 `/tmp/curand_contrac
 如需覆盖可设置 `CURAND_CONTRACT_DEVICE_BUILD_DIR`，不要依赖挂载仓库内的 `native/build` 可写。
 launcher 会用提交任务用户的 UID/GID 运行容器，避免 NFS/root-squash 环境下无法写
 `/workspace/results`。
+如果容器仍无法直接写仓库挂载，launcher 会把 `/workspace/results` 单独挂到计算节点
+`/tmp` spool 目录，Docker 结束后再由外层 Slurm shell 复制回仓库 `results/`。
 
 ### 5.2 分阶段正式跑
 
