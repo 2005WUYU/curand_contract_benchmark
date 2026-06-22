@@ -175,6 +175,9 @@ def _capability_support(row: dict[str, Any]) -> dict[str, Any]:
         "available": bool(row.get("available")),
         "available_on_any_shard": row.get("available_on_any_shard"),
         "available_on_all_shards": row.get("available_on_all_shards"),
+        "headers_available": row.get("headers_available"),
+        "header_paths": row.get("header_paths"),
+        "extension_available": row.get("extension_available"),
         "unsupported_reason": row.get("unsupported_reason"),
     }
 

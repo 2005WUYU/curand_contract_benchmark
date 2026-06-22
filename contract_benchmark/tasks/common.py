@@ -172,6 +172,15 @@ def curanddx_unsupported_record(
     parameters: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     cap = capability_matrix()
+    dx_status = cap.get("curanddx", {})
+    row_parameters = dict(parameters or {})
+    row_parameters.update(
+        {
+            "headers_available": dx_status.get("headers_available"),
+            "header_paths": dx_status.get("header_paths") or [],
+            "extension_available": dx_status.get("extension_available"),
+        }
+    )
     return unsupported_record(
         ctx,
         spec,
@@ -180,7 +189,7 @@ def curanddx_unsupported_record(
         generator=generator,
         distribution=distribution,
         n=n,
-        parameters=parameters,
+        parameters=row_parameters,
         baseline_id="curanddx",
     )
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from contract_benchmark.curanddx_support import curanddx_status
 from contract_benchmark.curand_library import library_load_report
 from contract_benchmark.generator_registry import GENERATOR_INFOS
 
@@ -11,10 +12,7 @@ def capability_matrix() -> dict[str, Any]:
         "curand_host": library_load_report(),
         "generators": {},
         "device_api_extension": optional_device_extension_status(),
-        "curanddx": {
-            "available": False,
-            "unsupported_reason": "cuRANDDx headers/build integration are not configured in this local repository.",
-        },
+        "curanddx": curanddx_status(),
     }
     for name, info in GENERATOR_INFOS.items():
         matrix["generators"][name] = {

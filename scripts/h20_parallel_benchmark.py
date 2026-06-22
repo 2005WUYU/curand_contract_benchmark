@@ -229,6 +229,14 @@ def _merge_capability_matrices(matrices: list[dict[str, Any]]) -> dict[str, Any]
 
 def _merge_support_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
     available_values = [bool(row.get("available")) for row in rows]
+    header_values = [bool(row.get("headers_available")) for row in rows if row.get("headers_available") is not None]
+    header_paths = sorted(
+        {
+            str(path)
+            for row in rows
+            for path in (row.get("header_paths") or [])
+        }
+    )
     reasons = [
         str(row.get("unsupported_reason"))
         for row in rows
@@ -238,6 +246,11 @@ def _merge_support_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
     merged["available"] = bool(available_values) and all(available_values)
     merged["available_on_any_shard"] = any(available_values)
     merged["available_on_all_shards"] = bool(available_values) and all(available_values)
+    if header_values:
+        merged["headers_available"] = any(header_values)
+        merged["headers_available_on_all_shards"] = all(header_values)
+    if header_paths:
+        merged["header_paths"] = header_paths
     merged["per_shard"] = rows
     if not merged["available_on_all_shards"]:
         merged["unsupported_reason"] = "; ".join(sorted(set(reasons))) or "not available on every shard"

@@ -127,10 +127,22 @@ unsupported 可以存在
 `unsupported` 常见来源：
 
 - legacy cuRAND Device API extension 尚未构建。
-- cuRANDDx 未配置。
+- cuRANDDx headers 未出现在实际 Docker 容器环境中，或 headers 已存在但 benchmark 尚无 cuRANDDx timing extension。
 - 某些 ordering 当前 generator/config 不支持。
 
 这些不是 smoke 失败，但必须保留在结果里。
+
+登录节点只负责提交任务和挂载仓库；真实 Python/CUDA/cuRANDDx 环境以
+`docker run ... <image>` 内部为准。使用带 MathDx/cuRANDDx 的镜像时可覆盖：
+
+```bash
+IMAGE=flagrand-cuda13-curanddx:latest \
+MATHDX_ROOT=/opt/mathdx/current \
+CPATH=/opt/mathdx/current/include/curanddx:/opt/mathdx/current/include \
+bash scripts/h20_benchmark.sh
+```
+
+`capability_matrix.json` 和 `REPORT.md` 会记录 cuRANDDx headers 是否在容器内被找到。
 
 ### 5.2 分阶段正式跑
 

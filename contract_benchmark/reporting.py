@@ -131,6 +131,10 @@ def write_report(
     if device_ext.get("unsupported_reason"):
         lines.append(f"  reason: {device_ext.get('unsupported_reason')}")
     lines.append(f"- cuRANDDx: `{_support_state(curanddx)}`")
+    if curanddx.get("headers_available") is not None:
+        lines.append(f"  headers_available: `{curanddx.get('headers_available')}`")
+    if curanddx.get("header_paths"):
+        lines.append(f"  headers: `{', '.join(str(path) for path in curanddx.get('header_paths', []))}`")
     if curanddx.get("unsupported_reason"):
         lines.append(f"  reason: {curanddx.get('unsupported_reason')}")
 

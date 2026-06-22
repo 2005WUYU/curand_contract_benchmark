@@ -6,12 +6,13 @@ import torch
 
 from contract_benchmark import kernels
 from contract_benchmark.adapters import capability_matrix, flagrand_generate_by_distribution, flagrand_generate_raw, make_flagrand_generator
+from contract_benchmark.curanddx_support import curanddx_status
 from contract_benchmark.profiles import BenchmarkContext
 from contract_benchmark.records import base_record, error_record, timed_record, unsupported_record
 from contract_benchmark.spec import TaskSpec
 from contract_benchmark.tasks.common import adjust_n, curanddx_unsupported_record, legacy_device_mapping_parameters, merge_validations, run_legacy_device_fused_extension, validate_after
 from contract_benchmark.timing import collect_cuda_event_and_wall_us
-from contract_benchmark.validation import validate_finite_output, validate_raw_tensor, validate_uniform, validation_pass
+from contract_benchmark.validation import unsupported, validate_finite_output, validate_raw_tensor, validate_uniform, validation_pass
 
 
 def run_device_raw_output(ctx: BenchmarkContext, spec: TaskSpec) -> list[dict[str, Any]]:
@@ -281,5 +282,27 @@ def run_e1_compile_support_matrix(ctx: BenchmarkContext, spec: TaskSpec) -> list
         record.update({"formal_result": validation.get("status") == "pass", "audit_flags": []})
         records.append(record)
 
-    records.append(curanddx_unsupported_record(ctx, spec, generator="philox4x32_10", distribution="compile_support"))
+    dx_status = curanddx_status()
+    dx_checks = {
+        "headers_available": bool(dx_status.get("headers_available")),
+        "benchmark_extension_available": bool(dx_status.get("extension_available")),
+    }
+    dx_record = base_record(
+        ctx,
+        spec,
+        "curanddx",
+        "compile_support_matrix",
+        "philox4x32_10",
+        "compile_support",
+        0,
+        validation=unsupported(str(dx_status.get("unsupported_reason")), dx_checks),
+        parameters={
+            "mathdx_root": dx_status.get("mathdx_root"),
+            "header_paths": dx_status.get("header_paths") or [],
+            "include_dirs_checked": dx_status.get("include_dirs_checked") or [],
+            "unsupported_reason": dx_status.get("unsupported_reason"),
+        },
+    )
+    dx_record.update({"formal_result": False, "audit_flags": ["unsupported_backend"]})
+    records.append(dx_record)
     return records
