@@ -275,6 +275,22 @@ def _merge_support_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
     merged["available"] = bool(available_values) and all(available_values)
     merged["available_on_any_shard"] = any(available_values)
     merged["available_on_all_shards"] = bool(available_values) and all(available_values)
+    for list_key in (
+        "build_dirs",
+        "cuda_library_dirs",
+        "cudart_candidates",
+        "shared_objects",
+        "missing_dependencies",
+    ):
+        values = sorted(
+            {
+                str(value)
+                for row in rows
+                for value in (row.get(list_key) or [])
+            }
+        )
+        if values:
+            merged[list_key] = values
     if header_values:
         merged["headers_available"] = any(header_values)
         merged["headers_available_on_all_shards"] = all(header_values)

@@ -132,6 +132,16 @@ def write_report(
     device_ext = capability_matrix.get("device_api_extension", {})
     curanddx = capability_matrix.get("curanddx", {})
     lines.append(f"- legacy Device API extension: `{_support_state(device_ext)}`")
+    if device_ext.get("module_file"):
+        lines.append(f"  module_file: `{device_ext.get('module_file')}`")
+    if device_ext.get("shared_objects"):
+        lines.append(f"  shared_objects: `{device_ext.get('shared_objects')}`")
+    if device_ext.get("missing_dependencies"):
+        lines.append(f"  missing_dependencies: `{device_ext.get('missing_dependencies')}`")
+    if device_ext.get("cudart_candidates"):
+        lines.append(f"  cudart_candidates: `{device_ext.get('cudart_candidates')}`")
+    if device_ext.get("extension_symbols"):
+        lines.append(f"  extension_symbols: `{device_ext.get('extension_symbols')}`")
     if device_ext.get("unsupported_reason"):
         lines.append(f"  reason: {device_ext.get('unsupported_reason')}")
     lines.append(f"- cuRANDDx: `{_support_state(curanddx)}`")

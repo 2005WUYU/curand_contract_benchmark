@@ -30,6 +30,7 @@ curand_contract_benchmark/
     curand_constants.py
     curand_library.py
     curand_generator.py
+    native_cuda_paths.py
     timing.py
     validation.py
     kernels.py
@@ -63,6 +64,8 @@ curand_contract_benchmark/
 `native/` 提供 legacy cuRAND Device API fused extension，以及 cuRANDDx Philox extension。
 Windows 本机未必能构建；H20/Linux 上可构建后作为设备端 fused baseline。
 cuRANDDx extension 覆盖 Philox raw32、uniform_f32、uniform threshold、add-uniform consume 和 dropout。
+`native_cuda_paths.py` 集中处理 native extension 的 CUDA runtime library path、rpath 和 `ldd`
+诊断，避免 legacy Device API/cuRANDDx extension 在不同容器镜像里静默吃到错误的 `libcudart`。
 
 ## 3. 任务体系
 

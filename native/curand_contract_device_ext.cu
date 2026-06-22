@@ -1,3 +1,5 @@
+#include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAException.h>
 #include <torch/extension.h>
 
 #include <cstdint>
@@ -102,16 +104,18 @@ void philox_raw_u32(torch::Tensor out, unsigned long long seed, unsigned long lo
   check_cuda_tensor(out, "out");
   TORCH_CHECK(out.scalar_type() == torch::kInt32, "out must be int32");
   int threads = 256;
-  philox_raw_u32_kernel<<<blocks_for(out.numel(), threads), threads>>>(
+  philox_raw_u32_kernel<<<blocks_for(out.numel(), threads), threads, 0, at::cuda::getCurrentCUDAStream()>>>(
       out.data_ptr<int32_t>(), out.numel(), seed, offset);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
 void philox_uniform(torch::Tensor out, unsigned long long seed, unsigned long long offset) {
   check_cuda_tensor(out, "out");
   TORCH_CHECK(out.scalar_type() == torch::kFloat32, "out must be float32");
   int threads = 256;
-  philox_uniform_kernel<<<blocks_for(out.numel(), threads), threads>>>(
+  philox_uniform_kernel<<<blocks_for(out.numel(), threads), threads, 0, at::cuda::getCurrentCUDAStream()>>>(
       out.data_ptr<float>(), out.numel(), seed, offset);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
 void philox_add_uniform(torch::Tensor x, torch::Tensor out, unsigned long long seed, unsigned long long offset, double alpha) {
@@ -121,16 +125,18 @@ void philox_add_uniform(torch::Tensor x, torch::Tensor out, unsigned long long s
   TORCH_CHECK(out.scalar_type() == torch::kFloat32, "out must be float32");
   TORCH_CHECK(x.numel() == out.numel(), "x and out must have the same numel");
   int threads = 256;
-  philox_add_uniform_kernel<<<blocks_for(out.numel(), threads), threads>>>(
+  philox_add_uniform_kernel<<<blocks_for(out.numel(), threads), threads, 0, at::cuda::getCurrentCUDAStream()>>>(
       x.data_ptr<float>(), out.data_ptr<float>(), out.numel(), seed, offset, static_cast<float>(alpha));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
 void philox_threshold(torch::Tensor mask, unsigned long long seed, unsigned long long offset, double p) {
   check_cuda_tensor(mask, "mask");
   TORCH_CHECK(mask.scalar_type() == torch::kUInt8, "mask must be uint8");
   int threads = 256;
-  philox_threshold_kernel<<<blocks_for(mask.numel(), threads), threads>>>(
+  philox_threshold_kernel<<<blocks_for(mask.numel(), threads), threads, 0, at::cuda::getCurrentCUDAStream()>>>(
       mask.data_ptr<unsigned char>(), mask.numel(), seed, offset, static_cast<float>(p));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
 void philox_dropout(torch::Tensor x, torch::Tensor out, torch::Tensor mask, unsigned long long seed, unsigned long long offset, double p) {
@@ -142,9 +148,10 @@ void philox_dropout(torch::Tensor x, torch::Tensor out, torch::Tensor mask, unsi
   TORCH_CHECK(mask.scalar_type() == torch::kUInt8, "mask must be uint8");
   TORCH_CHECK(x.numel() == out.numel() && x.numel() == mask.numel(), "x/out/mask numel mismatch");
   int threads = 256;
-  philox_dropout_kernel<<<blocks_for(out.numel(), threads), threads>>>(
+  philox_dropout_kernel<<<blocks_for(out.numel(), threads), threads, 0, at::cuda::getCurrentCUDAStream()>>>(
       x.data_ptr<float>(), out.data_ptr<float>(), mask.data_ptr<unsigned char>(),
       out.numel(), seed, offset, static_cast<float>(p));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {

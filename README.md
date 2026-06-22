@@ -69,6 +69,7 @@ NUM_GPUS=4 SLURM_PARTITION=long TIME_LIMIT=08:00:00 PROFILE=h20 GROUPS=all BUILD
 这些脚本外层使用 `srun --gres=gpu:<N>`，内层使用 `flagtree-nvidia:3.6-v2`，镜像缺失时会尝试从 `/data/nfs3/flagtree-nvidia-3.6-v2.tar` 加载。`NUM_GPUS>1` 时会按 task 分片并行跑，然后合并 `results.jsonl`、`results.csv` 和 `REPORT.md`。
 带 MathDx/cuRANDDx headers 的镜像中，`scripts/h20_benchmark.sh` 默认也会尝试构建 native cuRANDDx extension；
 `ALLOW_DEVICE_EXT_FAILURE=0` 会让 legacy Device API 和 cuRANDDx extension 构建失败都直接终止。
+脚本会在容器内自动设置 CUDA runtime `LD_LIBRARY_PATH`，legacy Device API extension 构建脚本也会写入 rpath 并输出 `ldd` 诊断。
 
 ## 输出结构
 

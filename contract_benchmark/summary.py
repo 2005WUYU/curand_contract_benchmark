@@ -207,6 +207,11 @@ def _capability_support(row: dict[str, Any]) -> dict[str, Any]:
         "extension_available": row.get("extension_available"),
         "extension_build_dir": row.get("extension_build_dir"),
         "extension_symbols": row.get("extension_symbols"),
+        "build_dirs": row.get("build_dirs"),
+        "module_file": row.get("module_file"),
+        "shared_objects": row.get("shared_objects"),
+        "missing_dependencies": row.get("missing_dependencies"),
+        "cudart_candidates": row.get("cudart_candidates"),
         "unsupported_reason": row.get("unsupported_reason"),
     }
 

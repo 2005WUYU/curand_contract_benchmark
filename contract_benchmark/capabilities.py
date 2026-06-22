@@ -31,11 +31,7 @@ def capability_matrix() -> dict[str, Any]:
 
 def optional_device_extension_status() -> dict[str, Any]:
     try:
-        from contract_benchmark.optional_device_api import find_built_curand_device_extension
+        from contract_benchmark.optional_device_api import curand_device_extension_status
     except Exception as exc:
         return {"available": False, "unsupported_reason": f"optional loader import failed: {exc}"}
-    module, reason = find_built_curand_device_extension()
-    return {
-        "available": module is not None,
-        "unsupported_reason": reason if module is None else None,
-    }
+    return curand_device_extension_status()

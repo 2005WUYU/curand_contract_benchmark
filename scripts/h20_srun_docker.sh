@@ -134,6 +134,30 @@ fi
       "${IMAGE}" \
       bash -lc '"'"'
         set -euo pipefail
+        build_ld_library_path() {
+          local dirs=()
+          local dir
+          for dir in \
+            /usr/local/cuda/lib64 \
+            /usr/local/cuda/lib \
+            /usr/local/cuda-*/lib64 \
+            /usr/local/cuda-*/lib \
+            /opt/conda/lib \
+            /opt/conda/lib/python*/site-packages/nvidia/*/lib; do
+            if [ -d "${dir}" ]; then
+              dirs+=("${dir}")
+            fi
+          done
+          if [ "${#dirs[@]}" -eq 0 ]; then
+            return 0
+          fi
+          local IFS=:
+          printf "%s" "${dirs[*]}"
+        }
+        LD_LIBRARY_PREFIX="$(build_ld_library_path)"
+        if [ -n "${LD_LIBRARY_PREFIX}" ]; then
+          export LD_LIBRARY_PATH="${LD_LIBRARY_PREFIX}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+        fi
         mkdir -p \
           "${HOME}" \
           "${XDG_CACHE_HOME}" \
@@ -143,6 +167,7 @@ fi
           "${CURAND_CONTRACT_CURANDDX_BUILD_DIR}"
         test -w "${TRITON_CACHE_DIR}"
         echo "[h20] triton_cache=${TRITON_CACHE_DIR}"
+        echo "[h20] ld_library_path=${LD_LIBRARY_PATH:-}"
         bash -lc "${INNER_CMD}"
       '"'"'
     docker_rc=$?

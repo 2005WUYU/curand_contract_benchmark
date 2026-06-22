@@ -6,8 +6,6 @@ from pathlib import Path
 import shutil
 import sys
 
-from torch.utils.cpp_extension import load
-
 
 HEADER_NAMES = (
     "curanddx.hpp",
@@ -44,6 +42,17 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     root = Path(__file__).resolve().parent
+    repo_root = root.parent
+    if str(repo_root) not in sys.path:
+        sys.path.insert(0, str(repo_root))
+    from contract_benchmark.native_cuda_paths import (
+        find_cuda_runtime_libraries,
+        prepend_cuda_library_path,
+        rpath_linker_flags,
+    )
+    from torch.utils.cpp_extension import load
+
+    ld_library_path = prepend_cuda_library_path()
     include_dirs = _candidate_include_dirs()
     header_paths = _find_headers(include_dirs)
     if not header_paths:
@@ -60,11 +69,14 @@ def main() -> int:
         sources=[str(root / "curanddx_contract_ext.cu")],
         extra_include_paths=[str(path) for path in include_dirs if path.exists()],
         extra_cuda_cflags=["-O3", f"-DCURANDDX_TARGET_SM={args.sm}"],
+        extra_ldflags=rpath_linker_flags(),
         build_directory=str(args.build_dir),
         verbose=args.verbose,
     )
     print(f"built {module.__name__}")
     print(f"build_dir={args.build_dir}")
+    print(f"ld_library_path={ld_library_path}")
+    print(f"cudart_candidates={[str(path) for path in find_cuda_runtime_libraries()]}")
     print(f"curanddx_target_sm={args.sm}")
     print(f"curanddx_headers={[str(path) for path in header_paths]}")
     return 0
