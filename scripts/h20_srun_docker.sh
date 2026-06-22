@@ -75,6 +75,7 @@ fi
     docker run --rm \
       --gpus all \
       --shm-size=16g \
+      --user "$(id -u):$(id -g)" \
       -e CUDA_VISIBLE_DEVICES="${SLURM_STEP_GPUS:-0}" \
       -e CURAND_CONTRACT_GIT_SHA="${CURAND_CONTRACT_GIT_SHA:-}" \
       -e CURAND_CONTRACT_DEVICE_BUILD_DIR="${CURAND_CONTRACT_DEVICE_BUILD_DIR}" \
