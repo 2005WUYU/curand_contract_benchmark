@@ -14,6 +14,7 @@ export IMAGE_TAR="${IMAGE_TAR:-/data/nfs3/flagtree-nvidia-3.6-v2.tar}"
 export INNER_CMD="$*"
 export REPO_ROOT
 export CURAND_CONTRACT_GIT_SHA="${CURAND_CONTRACT_GIT_SHA:-$(git -C "${REPO_ROOT}" rev-parse HEAD 2>/dev/null || true)}"
+export CURAND_CONTRACT_DEVICE_BUILD_DIR="${CURAND_CONTRACT_DEVICE_BUILD_DIR:-/tmp/curand_contract_device_ext_${USER:-user}}"
 
 SLURM_PARTITION="${SLURM_PARTITION:-debug}"
 SLURM_NODELIST="${SLURM_NODELIST:-${H20_NODELIST:-}}"
@@ -34,6 +35,7 @@ echo "[h20] image=${IMAGE}"
 echo "[h20] image_tar=${IMAGE_TAR}"
 echo "[h20] repo=${REPO_ROOT}"
 echo "[h20] git_sha=${CURAND_CONTRACT_GIT_SHA:-unknown}"
+echo "[h20] device_build_dir=${CURAND_CONTRACT_DEVICE_BUILD_DIR}"
 echo "[h20] inner_cmd=${INNER_CMD}"
 
 if [ "${DRY_RUN:-0}" = "1" ]; then
@@ -75,6 +77,11 @@ fi
       --shm-size=16g \
       -e CUDA_VISIBLE_DEVICES="${SLURM_STEP_GPUS:-0}" \
       -e CURAND_CONTRACT_GIT_SHA="${CURAND_CONTRACT_GIT_SHA:-}" \
+      -e CURAND_CONTRACT_DEVICE_BUILD_DIR="${CURAND_CONTRACT_DEVICE_BUILD_DIR}" \
+      -e MATHDX_ROOT="${MATHDX_ROOT:-}" \
+      -e CPATH="${CPATH:-}" \
+      -e CPLUS_INCLUDE_PATH="${CPLUS_INCLUDE_PATH:-}" \
+      -e CMAKE_PREFIX_PATH="${CMAKE_PREFIX_PATH:-}" \
       -v "${REPO_ROOT}":/workspace \
       -w /workspace \
       "${IMAGE}" \

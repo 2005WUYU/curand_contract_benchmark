@@ -146,6 +146,8 @@ bash scripts/h20_benchmark.sh
 `capability_matrix.json` 和 `REPORT.md` 会记录 cuRANDDx headers 是否在容器内被找到。
 Docker 镜像是节点本地资源；如果镜像只在特定节点上存在，需要设置
 `H20_NODELIST`/`SLURM_NODELIST`，或者设置 `IMAGE_TAR` 为真正包含该镜像 tag 的 tar 包。
+legacy cuRAND Device API extension 默认构建到容器内 `/tmp/curand_contract_device_ext_$USER`；
+如需覆盖可设置 `CURAND_CONTRACT_DEVICE_BUILD_DIR`，不要依赖挂载仓库内的 `native/build` 可写。
 
 ### 5.2 分阶段正式跑
 

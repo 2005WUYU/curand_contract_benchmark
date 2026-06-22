@@ -9,6 +9,7 @@ export CPUS_PER_GPU="${CPUS_PER_GPU:-24}"
 export MEM_PER_GPU_MB="${MEM_PER_GPU_MB:-242144}"
 export TIME_LIMIT="${TIME_LIMIT:-08:00:00}"
 export JOB_NAME="${JOB_NAME:-curand-h20-benchmark}"
+export CURAND_CONTRACT_DEVICE_BUILD_DIR="${CURAND_CONTRACT_DEVICE_BUILD_DIR:-/tmp/curand_contract_device_ext_${USER:-user}}"
 
 PROFILE="${PROFILE:-h20}"
 GROUPS_FROM_ENV="$(printenv GROUPS || true)"

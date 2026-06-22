@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 
 from torch.utils.cpp_extension import load
@@ -9,7 +10,13 @@ from torch.utils.cpp_extension import load
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build optional legacy cuRAND Device API extension.")
     parser.add_argument("--verbose", action="store_true")
-    parser.add_argument("--build-dir", type=Path, default=Path(__file__).resolve().parent / "build")
+    default_build_dir = Path(
+        os.environ.get(
+            "CURAND_CONTRACT_DEVICE_BUILD_DIR",
+            Path(__file__).resolve().parent / "build",
+        )
+    )
+    parser.add_argument("--build-dir", type=Path, default=default_build_dir)
     return parser.parse_args()
 
 
@@ -30,4 +37,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
