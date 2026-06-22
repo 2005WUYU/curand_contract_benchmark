@@ -137,12 +137,15 @@ unsupported 可以存在
 
 ```bash
 IMAGE=flagrand-cuda13-curanddx:latest \
+H20_NODELIST=bjdb-h20-node-038 \
 MATHDX_ROOT=/opt/mathdx/current \
 CPATH=/opt/mathdx/current/include/curanddx:/opt/mathdx/current/include \
 bash scripts/h20_benchmark.sh
 ```
 
 `capability_matrix.json` 和 `REPORT.md` 会记录 cuRANDDx headers 是否在容器内被找到。
+Docker 镜像是节点本地资源；如果镜像只在特定节点上存在，需要设置
+`H20_NODELIST`/`SLURM_NODELIST`，或者设置 `IMAGE_TAR` 为真正包含该镜像 tag 的 tar 包。
 
 ### 5.2 分阶段正式跑
 
