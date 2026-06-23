@@ -26,9 +26,7 @@ REQUIRED_SYMBOLS = (
 def find_built_curand_device_extension() -> tuple[Any | None, str | None]:
     root = Path(__file__).resolve().parents[1]
     build_dirs = _build_dirs(root)
-    for build_dir in build_dirs:
-        if build_dir.exists() and str(build_dir) not in sys.path:
-            sys.path.insert(0, str(build_dir))
+    _prepend_build_dirs(build_dirs)
     preload_info = _prepare_cuda_runtime()
     try:
         import curand_contract_device_ext  # type: ignore
@@ -75,11 +73,19 @@ def curand_device_extension_status() -> dict[str, Any]:
 
 
 def _build_dirs(root: Path) -> list[Path]:
-    build_dirs = []
     if os.environ.get("CURAND_CONTRACT_DEVICE_BUILD_DIR"):
-        build_dirs.append(Path(os.environ["CURAND_CONTRACT_DEVICE_BUILD_DIR"]))
-    build_dirs.append(root / "native" / "build")
-    return build_dirs
+        return [Path(os.environ["CURAND_CONTRACT_DEVICE_BUILD_DIR"])]
+    return [root / "native" / "build"]
+
+
+def _prepend_build_dirs(build_dirs: list[Path]) -> None:
+    for build_dir in reversed(build_dirs):
+        text = str(build_dir)
+        if not build_dir.exists():
+            continue
+        while text in sys.path:
+            sys.path.remove(text)
+        sys.path.insert(0, text)
 
 
 def _prepare_cuda_runtime() -> dict[str, Any]:
