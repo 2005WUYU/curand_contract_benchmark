@@ -85,11 +85,11 @@ def flagrand_generate_by_distribution(
 ) -> torch.Tensor:
     if distribution in ("raw32", "raw64"):
         return flagrand_generate_raw(out, generator_obj)
-    if distribution == "uniform_f32":
+    if distribution in {"uniform_f32", "uniform_f64"}:
         return flagrand_generate_uniform(out, generator_obj)
-    if distribution == "normal_f32":
+    if distribution in {"normal_f32", "normal_f64"}:
         return flagrand_generate_normal(out, generator_obj, mean=mean, stddev=stddev)
-    if distribution == "lognormal_f32":
+    if distribution in {"lognormal_f32", "lognormal_f64"}:
         return flagrand_generate_lognormal(out, generator_obj, mean=mean, stddev=stddev)
     if distribution == "poisson_u32":
         return flagrand_generate_poisson(out, generator_obj, lambda_val=lambda_val)

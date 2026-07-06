@@ -166,6 +166,21 @@ launcher 会用提交任务用户的 UID/GID 运行容器，避免 NFS/root-squa
 
 ### 5.2 分阶段正式跑
 
+只对比 cuRAND Host API 与 FlagRand public API 时，不使用原 task/gate benchmark；
+直接运行独立入口：
+
+```bash
+IMAGE=flagrand-cuda13-curanddx:latest \
+H20_NODELIST=bjdb-h20-node-038 \
+NUM_GPUS=4 \
+SLURM_PARTITION=long \
+TIME_LIMIT=08:00:00 \
+PROFILE=h20 \
+bash scripts/h20_hostapi_benchmark.sh
+```
+
+详细范围、参数和输出见 `docs/HOSTAPI_ONLY_BENCHMARK.md`。
+
 先跑 Host API 与基础任务，适合 `debug` 队列：
 
 ```bash
