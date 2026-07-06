@@ -8,7 +8,7 @@ import torch
 import triton
 import triton.language as tl
 
-from flagrand.rng._sequence import clear_chunk_cache, generate_chunked
+from flagrand.rng._sequence import clear_chunk_cache
 
 _params = torch.load(str(Path(__file__).parent / "data" / "mtgp32_params.pt"), map_location="cpu")
 
@@ -19,6 +19,7 @@ _MTGPDC_N = 351
 _MTGP32_STATE_SIZE = 1024
 _MTGP32_STATE_MASK = 1023
 _MTGP32_MASK = 0xFFF80000
+_MAX_CHUNKS_PER_LAUNCH = 256
 
 
 def _u32_to_int32(buf: torch.Tensor) -> torch.Tensor:
@@ -50,6 +51,7 @@ def _mtgp32_kernel(
     temper_ptr,
     n_elements,
     num_iters,
+    start_iter,
     n_blocks,
     BLOCK_SIZE: tl.constexpr,
     STATE_MASK: tl.constexpr,
@@ -66,7 +68,7 @@ def _mtgp32_kernel(
     offs = tl.arange(0, BLOCK_SIZE)
 
     for k in range(num_iters):
-        STATE_OFFSET = (k * BLOCK_SIZE) & STATE_MASK
+        STATE_OFFSET = ((start_iter + k) * BLOCK_SIZE) & STATE_MASK
 
         X1 = tl.load(state_ptr + s_base + ((offs + STATE_OFFSET) & STATE_MASK)).to(tl.uint32, bitcast=True)
         X2 = tl.load(state_ptr + s_base + ((offs + STATE_OFFSET + 1) & STATE_MASK)).to(tl.uint32, bitcast=True)
@@ -158,7 +160,7 @@ class Mtgp32Generator:
         block_size = int(kwargs.get("block_size", _MTGP32_BLOCK_SIZE))
         if block_size != _MTGP32_BLOCK_SIZE:
             raise ValueError("MTGP32 uses a fixed block_size=256 to preserve per-state dependency ordering.")
-        num_warps = kwargs.get("num_warps", 8)
+        num_warps = int(kwargs.get("num_warps", 8))
 
         n = out.numel()
         if n == 0:
@@ -166,37 +168,137 @@ class Mtgp32Generator:
         if seed is not None:
             raise ValueError("MTGP32 explicit seed override is not supported.")
 
-        generate_chunked(
-            self,
-            out,
-            start=offset_val,
-            chunk_size=_SEQUENCE_CHUNK,
-            cache_key=(seed_val, str(out.device), str(out.dtype), num_warps),
-            generate_chunk=lambda chunk, chunk_start: self._generate_chunk(chunk, seed_val, num_warps),
-        )
+        self._generate_contiguous(out, seed_val, offset_val, num_warps)
         self.offset = offset_val + n
         return out
 
-    def _generate_chunk(self, out: torch.Tensor, seed_val: int, num_warps: int) -> None:
-        device_str = str(out.device)
-        pos, sh1, sh2, param, temper = _build_param_tensors(device_str)
+    def _generate_contiguous(
+        self,
+        out: torch.Tensor,
+        seed_val: int,
+        offset_val: int,
+        num_warps: int,
+    ) -> None:
+        flat = out.view(-1)
+        cache_key = (seed_val, str(out.device), str(out.dtype), num_warps)
+        self._ensure_working_state(seed_val, str(out.device))
 
-        blocks_needed = (out.numel() + _MTGP32_BLOCK_SIZE - 1) // _MTGP32_BLOCK_SIZE
-        n_blocks = min(_MTGP32_MAX_BLOCKS, blocks_needed)
-        num_iters = (blocks_needed + n_blocks - 1) // n_blocks
+        written = 0
+        current = int(offset_val)
+        remaining = flat.numel()
+        while remaining:
+            copied = self._copy_from_cache(flat, written, current, remaining, cache_key)
+            if copied:
+                written += copied
+                current += copied
+                remaining -= copied
+                continue
 
-        # Mutated in place so subsequent calls advance the stream.
+            next_chunk_start = int(getattr(self, "_ws_next_chunk_start", 0))
+            if current > next_chunk_start:
+                target_chunk_start = (current // _SEQUENCE_CHUNK) * _SEQUENCE_CHUNK
+                self._advance_to_chunk_start(target_chunk_start, str(out.device), num_warps)
+                next_chunk_start = int(getattr(self, "_ws_next_chunk_start", 0))
+            if current < next_chunk_start:
+                raise RuntimeError(
+                    "MTGP32 cannot rewind without a cached partial chunk. "
+                    f"current={current}, next_chunk_start={next_chunk_start}."
+                )
+
+            if current % _SEQUENCE_CHUNK == 0 and remaining >= _SEQUENCE_CHUNK:
+                full_chunks = remaining // _SEQUENCE_CHUNK
+                launch_chunks = min(full_chunks, _MAX_CHUNKS_PER_LAUNCH)
+                span = launch_chunks * _SEQUENCE_CHUNK
+                # Collapse many 192-block chunks into one launch; partial tails
+                # still go through the cache path below to preserve continuity.
+                self._generate_chunks_into(
+                    flat[written : written + span],
+                    str(out.device),
+                    num_warps,
+                    launch_chunks,
+                )
+                written += span
+                current += span
+                remaining -= span
+                continue
+
+            chunk_start = (current // _SEQUENCE_CHUNK) * _SEQUENCE_CHUNK
+            if chunk_start != int(getattr(self, "_ws_next_chunk_start", 0)):
+                self._advance_to_chunk_start(chunk_start, str(out.device), num_warps)
+            cache = torch.empty(_SEQUENCE_CHUNK, device=out.device, dtype=out.dtype)
+            self._generate_chunks_into(cache, str(out.device), num_warps, 1)
+            setattr(self, "_chunk_cache", cache)
+            setattr(self, "_chunk_cache_start", chunk_start)
+            setattr(self, "_chunk_cache_key", cache_key)
+
+    def _ensure_working_state(self, seed_val: int, device_str: str) -> None:
         ws_seed = getattr(self, "_ws_seed", None)
         ws_device = getattr(self, "_ws_device", None)
         ws_blocks = getattr(self, "_ws_blocks", 0)
-        if ws_seed != seed_val or ws_device != device_str or ws_blocks < n_blocks:
-            initial_state = _build_initial_state(seed_val, device_str)
-            self._working_state = initial_state.clone()
-            self._ws_seed = seed_val
-            self._ws_device = device_str
-            self._ws_blocks = self._working_state.shape[0]
+        if ws_seed == seed_val and ws_device == device_str and ws_blocks >= _MTGP32_MAX_BLOCKS:
+            return
+        initial_state = _build_initial_state(seed_val, device_str)
+        self._working_state = initial_state.clone()
+        self._ws_seed = seed_val
+        self._ws_device = device_str
+        self._ws_blocks = self._working_state.shape[0]
+        self._ws_next_chunk_start = 0
+        clear_chunk_cache(self)
+
+    def _copy_from_cache(
+        self,
+        flat: torch.Tensor,
+        written: int,
+        current: int,
+        remaining: int,
+        cache_key: tuple[object, ...],
+    ) -> int:
+        cache = getattr(self, "_chunk_cache", None)
+        cache_start = int(getattr(self, "_chunk_cache_start", -1))
+        cache_key_current = getattr(self, "_chunk_cache_key", None)
+        cache_valid = (
+            cache is not None
+            and cache_key_current == cache_key
+            and cache_start <= current < cache_start + cache.numel()
+        )
+        if not cache_valid:
+            return 0
+        cache_offset = current - cache_start
+        take = min(remaining, cache.numel() - cache_offset)
+        flat[written : written + take].copy_(cache[cache_offset : cache_offset + take])
+        if cache_offset + take == cache.numel():
             clear_chunk_cache(self)
+        return take
+
+    def _advance_to_chunk_start(self, chunk_start: int, device_str: str, num_warps: int) -> None:
+        next_chunk_start = int(getattr(self, "_ws_next_chunk_start", 0))
+        if chunk_start < next_chunk_start:
+            return
+        chunks_to_skip = (chunk_start - next_chunk_start) // _SEQUENCE_CHUNK
+        if chunks_to_skip <= 0:
+            return
+        scratch = torch.empty(0, device=torch.device(device_str), dtype=torch.int32)
+        while chunks_to_skip:
+            launch_chunks = min(chunks_to_skip, _MAX_CHUNKS_PER_LAUNCH)
+            self._generate_chunks_into(scratch, device_str, num_warps, launch_chunks, n_elements=0)
+            chunks_to_skip -= launch_chunks
+
+    def _generate_chunks_into(
+        self,
+        out: torch.Tensor,
+        device_str: str,
+        num_warps: int,
+        chunks: int,
+        *,
+        n_elements: int | None = None,
+    ) -> None:
+        if chunks <= 0:
+            return
+        pos, sh1, sh2, param, temper = _build_param_tensors(device_str)
+        n_blocks = _MTGP32_MAX_BLOCKS
         state = self._working_state[:n_blocks]
+        start_iter = (int(getattr(self, "_ws_next_chunk_start", 0)) // _SEQUENCE_CHUNK) % 4
+        output_elements = out.numel() if n_elements is None else int(n_elements)
 
         grid = (n_blocks,)
         _mtgp32_kernel[grid](
@@ -207,8 +309,9 @@ class Mtgp32Generator:
             sh2[:n_blocks],
             param[: n_blocks * 16],
             temper[: n_blocks * 16],
-            out.numel(),
-            num_iters,
+            output_elements,
+            int(chunks),
+            start_iter,
             n_blocks,
             BLOCK_SIZE=_MTGP32_BLOCK_SIZE,
             STATE_MASK=_MTGP32_STATE_MASK,
@@ -216,3 +319,4 @@ class Mtgp32Generator:
             N_RECUR=_MTGPDC_N,
             num_warps=num_warps,
         )
+        self._ws_next_chunk_start = int(getattr(self, "_ws_next_chunk_start", 0)) + chunks * _SEQUENCE_CHUNK
