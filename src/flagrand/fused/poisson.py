@@ -133,11 +133,12 @@ def generate_poisson(
     if is_64:
         raw = _generate_raw64(generator, out.shape, out.device)
         if lambda_val < 30.0:
+            max_k = _small_poisson_max_k(lambda_val)
             grid = (triton.cdiv(n, block_size),)
             _poisson_transform_kernel_small_64[grid](
                 out.view(-1), raw.view(-1), n,
                 lambda_val,
-                BLOCK=block_size, MAX_K=192, num_warps=num_warps,
+                BLOCK=block_size, MAX_K=max_k, num_warps=num_warps,
             )
         else:
             n_pairs = n // 2
@@ -150,11 +151,12 @@ def generate_poisson(
     else:
         raw = _generate_raw(generator, out.shape, out.device)
         if lambda_val < 30.0:
+            max_k = _small_poisson_max_k(lambda_val)
             grid = (triton.cdiv(n, block_size),)
             _poisson_transform_kernel_small_32[grid](
                 out.view(-1), raw.view(-1), n,
                 lambda_val,
-                BLOCK=block_size, MAX_K=192, num_warps=num_warps,
+                BLOCK=block_size, MAX_K=max_k, num_warps=num_warps,
             )
         else:
             n_pairs = n // 2
@@ -166,3 +168,15 @@ def generate_poisson(
             )
 
     return out
+
+
+def _small_poisson_max_k(lambda_val: float) -> int:
+    if lambda_val <= 0.1:
+        return 16
+    if lambda_val <= 1.0:
+        return 32
+    if lambda_val <= 4.0:
+        return 64
+    if lambda_val <= 10.0:
+        return 96
+    return 160
