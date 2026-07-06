@@ -50,9 +50,9 @@ def _mtgp32_kernel(
     param_ptr,
     temper_ptr,
     n_elements,
-    num_iters,
-    start_iter,
-    n_blocks,
+    NUM_ITERS: tl.constexpr,
+    START_ITER: tl.constexpr,
+    N_BLOCKS: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
     STATE_MASK: tl.constexpr,
     MASK: tl.constexpr,
@@ -67,8 +67,8 @@ def _mtgp32_kernel(
     p_base = pid * 16
     offs = tl.arange(0, BLOCK_SIZE)
 
-    for k in range(num_iters):
-        STATE_OFFSET = ((start_iter + k) * BLOCK_SIZE) & STATE_MASK
+    for k in range(NUM_ITERS):
+        STATE_OFFSET = ((START_ITER + k) * BLOCK_SIZE) & STATE_MASK
 
         X1 = tl.load(state_ptr + s_base + ((offs + STATE_OFFSET) & STATE_MASK)).to(tl.uint32, bitcast=True)
         X2 = tl.load(state_ptr + s_base + ((offs + STATE_OFFSET + 1) & STATE_MASK)).to(tl.uint32, bitcast=True)
@@ -85,11 +85,12 @@ def _mtgp32_kernel(
         T = tl.load(state_ptr + s_base + ((offs + STATE_OFFSET + pos - 1) & STATE_MASK)).to(tl.uint32, bitcast=True)
         o = _mtgp32_temper(r, T)
 
-        out_idx = (k * n_blocks + pid) * BLOCK_SIZE + offs
+        out_idx = (k * N_BLOCKS + pid) * BLOCK_SIZE + offs
         out_mask = out_idx < n_elements
         tl.store(out_ptr + out_idx, o.to(tl.int32, bitcast=True), mask=out_mask)
 
-        tl.debug_barrier()
+        if k + 1 < NUM_ITERS:
+            tl.debug_barrier()
 
 
 def _mtgp32_init_state_cpu(bid: int, state_seed: int) -> list[int]:
@@ -369,6 +370,7 @@ class Mtgp32Generator:
         start_iter = (int(getattr(self, "_ws_next_block_start", 0)) // _SEQUENCE_CHUNK) % 4
         output_elements = out.numel() if n_elements is None else int(n_elements)
 
+        launch_warps = _mtgp32_launch_warps(block_count, chunks, num_warps)
         grid = (block_count,)
         _mtgp32_kernel[grid](
             out,
@@ -386,9 +388,15 @@ class Mtgp32Generator:
             STATE_MASK=_MTGP32_STATE_MASK,
             MASK=_MTGP32_MASK,
             N_RECUR=_MTGPDC_N,
-            num_warps=num_warps,
+            num_warps=launch_warps,
         )
         self._ws_next_block_start = (
             int(getattr(self, "_ws_next_block_start", 0))
             + chunks * block_count * _MTGP32_BLOCK_SIZE
         )
+
+
+def _mtgp32_launch_warps(block_count: int, chunks: int, requested: int) -> int:
+    if chunks == 1 and block_count <= 32:
+        return min(requested, 2)
+    return requested
