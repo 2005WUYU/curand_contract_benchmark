@@ -20,7 +20,6 @@ _MTGP32_STATE_SIZE = 1024
 _MTGP32_STATE_MASK = 1023
 _MTGP32_MASK = 0xFFF80000
 _MAX_CHUNKS_PER_LAUNCH = 256
-_MAX_SEQUENCE_BLOCKS_PER_LAUNCH = 2048
 
 
 def _u32_to_int32(buf: torch.Tensor) -> torch.Tensor:
@@ -89,65 +88,6 @@ def _mtgp32_kernel(
         out_idx = (k * N_BLOCKS + pid) * BLOCK_SIZE + offs
         out_mask = out_idx < n_elements
         tl.store(out_ptr + out_idx, o.to(tl.int32, bitcast=True), mask=out_mask)
-
-        if k + 1 < NUM_ITERS:
-            tl.debug_barrier()
-
-
-@triton.jit
-def _mtgp32_sequence_kernel(
-    out_ptr,
-    state_ptr,
-    pos_ptr,
-    sh1_ptr,
-    sh2_ptr,
-    param_ptr,
-    temper_ptr,
-    n_elements,
-    TOTAL_BLOCKS: tl.constexpr,
-    START_MOD: tl.constexpr,
-    ITER_BASE: tl.constexpr,
-    NUM_ITERS: tl.constexpr,
-    MAX_BLOCKS: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
-    STATE_MASK: tl.constexpr,
-    MASK: tl.constexpr,
-    N_RECUR: tl.constexpr,
-):
-    pid = tl.program_id(0)
-    block_id = (START_MOD + pid) % MAX_BLOCKS
-    first_iter = ITER_BASE + ((START_MOD + pid) // MAX_BLOCKS)
-
-    pos = tl.load(pos_ptr + block_id)
-    sh1 = tl.load(sh1_ptr + block_id)
-    sh2 = tl.load(sh2_ptr + block_id)
-
-    s_base = block_id * (STATE_MASK + 1)
-    p_base = block_id * 16
-    offs = tl.arange(0, BLOCK_SIZE)
-
-    for k in range(NUM_ITERS):
-        seq_block = pid + k * MAX_BLOCKS
-        active = seq_block < TOTAL_BLOCKS
-        STATE_OFFSET = ((first_iter + k) * BLOCK_SIZE) & STATE_MASK
-
-        X1 = tl.load(state_ptr + s_base + ((offs + STATE_OFFSET) & STATE_MASK)).to(tl.uint32, bitcast=True)
-        X2 = tl.load(state_ptr + s_base + ((offs + STATE_OFFSET + 1) & STATE_MASK)).to(tl.uint32, bitcast=True)
-        Y = tl.load(state_ptr + s_base + ((offs + STATE_OFFSET + pos) & STATE_MASK)).to(tl.uint32, bitcast=True)
-
-        Y = _mtgp32_recurrence(X1, X2, Y, sh1, sh2, MASK)
-
-        MAT = tl.load(param_ptr + p_base + (Y & 0x0F)).to(tl.uint32, bitcast=True)
-        r = Y ^ MAT
-
-        new_state_idx = (offs + STATE_OFFSET + N_RECUR) & STATE_MASK
-        tl.store(state_ptr + s_base + new_state_idx, r.to(tl.int32, bitcast=True), mask=active)
-
-        T = tl.load(state_ptr + s_base + ((offs + STATE_OFFSET + pos - 1) & STATE_MASK)).to(tl.uint32, bitcast=True)
-        o = _mtgp32_temper(r, T)
-
-        out_idx = seq_block * BLOCK_SIZE + offs
-        tl.store(out_ptr + out_idx, o.to(tl.int32, bitcast=True), mask=active & (out_idx < n_elements))
 
         if k + 1 < NUM_ITERS:
             tl.debug_barrier()
@@ -222,7 +162,6 @@ class Mtgp32Generator:
         if block_size != _MTGP32_BLOCK_SIZE:
             raise ValueError("MTGP32 uses a fixed block_size=256 to preserve per-state dependency ordering.")
         num_warps = int(kwargs.get("num_warps", 8))
-        use_sequence_kernel = bool(kwargs.get("_use_sequence_kernel", False))
 
         n = out.numel()
         if n == 0:
@@ -230,7 +169,7 @@ class Mtgp32Generator:
         if seed is not None:
             raise ValueError("MTGP32 explicit seed override is not supported.")
 
-        self._generate_contiguous(out, seed_val, offset_val, num_warps, use_sequence_kernel)
+        self._generate_contiguous(out, seed_val, offset_val, num_warps)
         self.offset = offset_val + n
         return out
 
@@ -240,7 +179,6 @@ class Mtgp32Generator:
         seed_val: int,
         offset_val: int,
         num_warps: int,
-        use_sequence_kernel: bool,
     ) -> None:
         flat = out.view(-1)
         device_str = str(out.device)
@@ -273,28 +211,6 @@ class Mtgp32Generator:
                 self._cache_one_block(current, out.device, out.dtype, cache_key, device_str, num_warps)
                 continue
 
-            full_blocks = remaining // _MTGP32_BLOCK_SIZE
-            block_start = (current % _SEQUENCE_CHUNK) // _MTGP32_BLOCK_SIZE
-            crosses_chunk = block_start + full_blocks > _MTGP32_MAX_BLOCKS
-            if (
-                use_sequence_kernel
-                and full_blocks
-                and crosses_chunk
-                and full_blocks <= _MAX_SEQUENCE_BLOCKS_PER_LAUNCH
-            ):
-                span = full_blocks * _MTGP32_BLOCK_SIZE
-                self._generate_block_sequence_into(
-                    flat[written : written + span],
-                    device_str,
-                    num_warps,
-                    start_block=current // _MTGP32_BLOCK_SIZE,
-                    total_blocks=full_blocks,
-                )
-                written += span
-                current += span
-                remaining -= span
-                continue
-
             if current % _SEQUENCE_CHUNK == 0 and remaining >= _SEQUENCE_CHUNK:
                 full_chunks = remaining // _SEQUENCE_CHUNK
                 launch_chunks = min(full_chunks, _MAX_CHUNKS_PER_LAUNCH)
@@ -312,6 +228,8 @@ class Mtgp32Generator:
                 remaining -= span
                 continue
 
+            full_blocks = remaining // _MTGP32_BLOCK_SIZE
+            block_start = (current % _SEQUENCE_CHUNK) // _MTGP32_BLOCK_SIZE
             block_count = min(full_blocks, _MTGP32_MAX_BLOCKS - block_start)
             if block_count:
                 span = block_count * _MTGP32_BLOCK_SIZE
@@ -475,49 +393,6 @@ class Mtgp32Generator:
         self._ws_next_block_start = (
             int(getattr(self, "_ws_next_block_start", 0))
             + chunks * block_count * _MTGP32_BLOCK_SIZE
-        )
-
-    def _generate_block_sequence_into(
-        self,
-        out: torch.Tensor,
-        device_str: str,
-        num_warps: int,
-        *,
-        start_block: int,
-        total_blocks: int,
-    ) -> None:
-        if total_blocks <= 0:
-            return
-        pos, sh1, sh2, param, temper = _build_param_tensors(device_str)
-        start_mod = start_block % _MTGP32_MAX_BLOCKS
-        iter_base = start_block // _MTGP32_MAX_BLOCKS
-        active_blocks = min(total_blocks, _MTGP32_MAX_BLOCKS)
-        num_iters = triton.cdiv(total_blocks, _MTGP32_MAX_BLOCKS)
-        launch_warps = _mtgp32_launch_warps(active_blocks, num_iters, num_warps)
-
-        _mtgp32_sequence_kernel[(active_blocks,)](
-            out,
-            self._working_state,
-            pos,
-            sh1,
-            sh2,
-            param,
-            temper,
-            out.numel(),
-            total_blocks,
-            start_mod,
-            iter_base,
-            num_iters,
-            MAX_BLOCKS=_MTGP32_MAX_BLOCKS,
-            BLOCK_SIZE=_MTGP32_BLOCK_SIZE,
-            STATE_MASK=_MTGP32_STATE_MASK,
-            MASK=_MTGP32_MASK,
-            N_RECUR=_MTGPDC_N,
-            num_warps=launch_warps,
-        )
-        self._ws_next_block_start = (
-            int(getattr(self, "_ws_next_block_start", 0))
-            + total_blocks * _MTGP32_BLOCK_SIZE
         )
 
 
