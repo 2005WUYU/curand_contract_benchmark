@@ -6,10 +6,16 @@ import triton.language as tl
 
 from flagrand._device import require_accelerator, assert_tensor_device_supported
 from flagrand.fused._internal.philox_direct import generate_philox_normal_f32
+from flagrand.fused._internal.state_prng_direct import (
+    generate_mrg32k3a_normal_f32,
+    generate_xorwow_normal_f32,
+)
 from flagrand.fused._internal.transforms import uint32_to_uniform, uint64_to_uniform64, uniform_to_normal
 from flagrand.fused._internal.utils import (
     get_generator_type,
     GENERATOR_PHILOX,
+    GENERATOR_XORWOW,
+    GENERATOR_MRG32K3A,
     GENERATOR_SOBOL64,
     GENERATOR_SCRAMBLED_SOBOL64,
     _generate_raw,
@@ -96,6 +102,12 @@ def generate_normal(
             block_size=block_size,
             num_warps=num_warps,
         )
+        return out
+    if not is_64 and gen_type == GENERATOR_XORWOW:
+        generate_xorwow_normal_f32(out, generator, mean=mean, stddev=stddev)
+        return out
+    if not is_64 and gen_type == GENERATOR_MRG32K3A:
+        generate_mrg32k3a_normal_f32(out, generator, mean=mean, stddev=stddev)
         return out
 
     if is_64:

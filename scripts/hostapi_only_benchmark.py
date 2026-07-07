@@ -991,6 +991,14 @@ def _flagrand_path_kind(case: HostApiCase) -> str:
     }:
         return "direct_philox_distribution"
 
+    if case.generator in {"xorwow", "mrg32k3a"} and distribution in {
+        "uniform_f32",
+        "normal_f32",
+        "lognormal_f32",
+        "poisson_u32",
+    }:
+        return "direct_state_prng_distribution"
+
     if case.generator == "mtgp32" and distribution == "uniform_f32":
         return "direct_generator_distribution"
 
@@ -1002,7 +1010,12 @@ def _flagrand_path_kind(case: HostApiCase) -> str:
 
 
 def _flagrand_launch_estimate(case: HostApiCase, path_kind: str) -> int | None:
-    if path_kind in {"direct_philox_distribution", "direct_generator_distribution", "direct_generator_raw"}:
+    if path_kind in {
+        "direct_philox_distribution",
+        "direct_state_prng_distribution",
+        "direct_generator_distribution",
+        "direct_generator_raw",
+    }:
         return 1
     if path_kind == "python_dim_loop_raw":
         return max(1, int(case.dimensions or 1))

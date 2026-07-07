@@ -6,10 +6,16 @@ import triton.language as tl
 
 from flagrand._device import require_accelerator, assert_tensor_device_supported
 from flagrand.fused._internal.philox_direct import generate_philox_poisson_u32
+from flagrand.fused._internal.state_prng_direct import (
+    generate_mrg32k3a_poisson_u32,
+    generate_xorwow_poisson_u32,
+)
 from flagrand.fused._internal.transforms import uint32_to_uniform, uint64_to_uniform64, uniform_to_normal
 from flagrand.fused._internal.utils import (
     get_generator_type,
     GENERATOR_PHILOX,
+    GENERATOR_XORWOW,
+    GENERATOR_MRG32K3A,
     GENERATOR_SOBOL64,
     GENERATOR_SCRAMBLED_SOBOL64,
     _generate_raw,
@@ -136,6 +142,14 @@ def generate_poisson(
         raise ValueError(
             f"generate_poisson: lambda >= 30 currently requires an even element count, got {n}."
         )
+    if not is_64 and gen_type == GENERATOR_XORWOW:
+        max_k = _small_poisson_max_k(lambda_val) if lambda_val < 30.0 else 0
+        generate_xorwow_poisson_u32(out, generator, lambda_val=lambda_val, max_k=max_k)
+        return out
+    if not is_64 and gen_type == GENERATOR_MRG32K3A:
+        max_k = _small_poisson_max_k(lambda_val) if lambda_val < 30.0 else 0
+        generate_mrg32k3a_poisson_u32(out, generator, lambda_val=lambda_val, max_k=max_k)
+        return out
 
     if is_64:
         raw = _generate_raw64(generator, out.shape, out.device)
