@@ -8,8 +8,8 @@ import triton.language as tl
 
 from flagrand.rng._sequence import generate_chunked
 
-_BLOCK: int = 256
-_TARGET_THREADS: int = 4096
+_BLOCK: int = 128
+_TARGET_THREADS: int = 131072
 _SEQUENCE_CHUNK: int = 1 << 20
 
 
@@ -141,5 +141,5 @@ def _launch_xorwow(out: torch.Tensor, seed_val: int, offset_val: int) -> None:
         n_threads,
         num_iters,
         BLOCK=_BLOCK,
-        num_warps=8,
+        num_warps=4,
     )

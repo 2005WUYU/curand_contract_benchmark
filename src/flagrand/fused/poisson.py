@@ -5,6 +5,7 @@ import triton
 import triton.language as tl
 
 from flagrand._device import require_accelerator, assert_tensor_device_supported
+from flagrand.fused._internal.philox_direct import generate_philox_poisson_u32
 from flagrand.fused._internal.transforms import uint32_to_uniform, uint64_to_uniform64, uniform_to_normal
 from flagrand.fused._internal.utils import (
     get_generator_type,
@@ -120,11 +121,17 @@ def generate_poisson(
         raise ValueError(f"generate_poisson: num_warps must be > 0, got {num_warps}.")
 
     if not is_64 and gen_type == GENERATOR_PHILOX:
-        if n % 4 != 0:
-            raise ValueError(
-                f"generate_poisson: Philox requires element count to be "
-                f"a multiple of 4, got {n}."
-            )
+        max_k = _small_poisson_max_k(lambda_val) if lambda_val < 30.0 else 0
+        generate_philox_poisson_u32(
+            out,
+            generator,
+            lambda_val=lambda_val,
+            max_k=max_k,
+            block_size=block_size,
+            num_warps=num_warps,
+        )
+        return out
+
     if lambda_val >= 30.0 and n % 2:
         raise ValueError(
             f"generate_poisson: lambda >= 30 currently requires an even element count, got {n}."

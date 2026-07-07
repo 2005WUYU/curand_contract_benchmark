@@ -5,6 +5,7 @@ import triton
 import triton.language as tl
 
 from flagrand._device import require_accelerator, assert_tensor_device_supported
+from flagrand.fused._internal.philox_direct import generate_philox_lognormal_f32
 from flagrand.fused._internal.transforms import uint32_to_uniform, uint64_to_uniform64, uniform_to_normal
 from flagrand.fused._internal.utils import (
     get_generator_type,
@@ -82,13 +83,19 @@ def generate_lognormal(
         raise ValueError(f"generate_lognormal: block_size must be > 0, got {block_size}.")
     if num_warps <= 0:
         raise ValueError(f"generate_lognormal: num_warps must be > 0, got {num_warps}.")
+    if n % 2 != 0:
+        raise ValueError(f"generate_lognormal: Box-Muller output requires an even element count, got {n}.")
 
     if not is_64 and gen_type == GENERATOR_PHILOX:
-        if n % 4 != 0:
-            raise ValueError(
-                f"generate_lognormal: Philox requires element count to be "
-                f"a multiple of 4, got {n}."
-            )
+        generate_philox_lognormal_f32(
+            out,
+            generator,
+            mean=mean,
+            stddev=stddev,
+            block_size=block_size,
+            num_warps=num_warps,
+        )
+        return out
 
     if is_64:
         raw = _generate_raw64(generator, out.shape, out.device)

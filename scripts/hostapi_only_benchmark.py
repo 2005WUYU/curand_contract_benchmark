@@ -426,6 +426,7 @@ def _timed_record(
     median_gpu_us = timing_record.get("median_gpu_us")
     median_wall_us = timing_record.get("median_wall_sync_us")
     output_bytes = case.n * torch.empty((), dtype=case.torch_dtype).element_size()
+    execution = _execution_metadata(case, backend)
     return {
         **case.to_record(),
         "benchmark": BENCHMARK_NAME,
@@ -437,7 +438,7 @@ def _timed_record(
         "status": "ok" if validation.get("status") == "pass" else "validation_fail",
         "validation": validation,
         "output_bytes": output_bytes,
-        "temporary_bytes": _temporary_bytes(case, backend),
+        **execution,
         "timing": timing_record,
         "median_gpu_us": median_gpu_us,
         "median_wall_sync_us": median_wall_us,
@@ -455,6 +456,7 @@ def _exception_record(
     *,
     args: argparse.Namespace,
 ) -> dict[str, Any]:
+    execution = _execution_metadata(case, backend)
     return {
         **case.to_record(),
         "benchmark": BENCHMARK_NAME,
@@ -470,7 +472,7 @@ def _exception_record(
             "error_type": type(exc).__name__,
         },
         "output_bytes": case.n * torch.empty((), dtype=case.torch_dtype).element_size(),
-        "temporary_bytes": _temporary_bytes(case, backend),
+        **execution,
         "timing": {},
         "median_gpu_us": None,
         "median_wall_sync_us": None,
@@ -670,7 +672,8 @@ def _write_report(path: Path, records: list[dict[str, Any]], summary: dict[str, 
             "## Interpretation Notes",
             "",
             "- `speedup_gpu_vs_curand_host > 1` means FlagRand was faster than cuRAND Host API by CUDA-event median.",
-            "- Large-lambda FlagRand Poisson rows use the repository approximation path and are marked in case notes.",
+            "- `path_kind`, `kernel_launch_count_estimate`, and `temporary_bytes` are recorded per row to distinguish direct public paths from raw-plus-transform paths.",
+            "- Large-lambda FlagRand Poisson rows use the repository approximation path and are marked with `semantic_mode=approximation`.",
             "- Full per-repeat timing samples are in `records.jsonl`; compact analysis rows are in `records.csv`.",
         ]
     )
@@ -681,14 +684,16 @@ def _markdown_table(records: list[dict[str, Any]], *, limit: int) -> list[str]:
     if not records:
         return ["No paired rows."]
     lines = [
-        "| generator | distribution | N | params | curand_gpu_us | flagrand_gpu_us | speedup_gpu | flagrand_wall_us |",
-        "|---|---:|---:|---|---:|---:|---:|---:|",
+        "| generator | distribution | path | semantic | N | params | curand_gpu_us | flagrand_gpu_us | speedup_gpu | flagrand_wall_us |",
+        "|---|---:|---|---|---:|---|---:|---:|---:|---:|",
     ]
     for record in records[:limit]:
         lines.append(
-            "| {generator} | {distribution} | {n} | `{params}` | {curand_gpu} | {flagrand_gpu} | {speedup} | {wall} |".format(
+            "| {generator} | {distribution} | {path} | {semantic} | {n} | `{params}` | {curand_gpu} | {flagrand_gpu} | {speedup} | {wall} |".format(
                 generator=record["generator"],
                 distribution=record["distribution"],
+                path=record.get("path_kind"),
+                semantic=record.get("semantic_mode"),
                 n=record["N"],
                 params=json.dumps(record.get("parameters", {}), sort_keys=True),
                 curand_gpu=_fmt(record.get("curand_host_median_gpu_us")),
@@ -698,7 +703,7 @@ def _markdown_table(records: list[dict[str, Any]], *, limit: int) -> list[str]:
             )
         )
     if len(records) > limit:
-        lines.append(f"| ... | ... | ... | ... | ... | ... | ... | ... |")
+        lines.append("| ... | ... | ... | ... | ... | ... | ... | ... | ... | ... |")
     return lines
 
 
@@ -732,6 +737,11 @@ def _write_csv(path: Path, records: list[dict[str, Any]]) -> None:
         "parameters",
         "dimensions",
         "status",
+        "path_kind",
+        "kernel_launch_count_estimate",
+        "semantic_mode",
+        "semantic_model",
+        "semantic_equivalence",
         "validation_status",
         "unsupported_reason",
         "median_gpu_us",
@@ -746,6 +756,7 @@ def _write_csv(path: Path, records: list[dict[str, Any]]) -> None:
         "curand_host_median_wall_sync_us",
         "output_bytes",
         "temporary_bytes",
+        "generator_state_bytes_estimate",
         "notes",
     ]
     with path.open("w", encoding="utf-8", newline="") as f:
@@ -901,12 +912,136 @@ def _torch_dtype(dtype_name: str) -> torch.dtype:
 
 
 def _temporary_bytes(case: HostApiCase, backend: str) -> int:
+    return int(_execution_metadata(case, backend)["temporary_bytes"])
+
+
+def _execution_metadata(case: HostApiCase, backend: str) -> dict[str, Any]:
+    semantic = _semantic_metadata(case, backend)
+    if backend == "curand_host_api":
+        return {
+            **semantic,
+            "path_kind": "curand_host_direct",
+            "kernel_launch_count_estimate": 1,
+            "temporary_bytes": 0,
+            "generator_state_bytes_estimate": _generator_state_bytes_estimate(case.generator),
+        }
     if backend != "flagrand_public_api":
+        return {
+            **semantic,
+            "path_kind": "unknown",
+            "kernel_launch_count_estimate": None,
+            "temporary_bytes": 0,
+            "generator_state_bytes_estimate": _generator_state_bytes_estimate(case.generator),
+        }
+
+    path_kind = _flagrand_path_kind(case)
+    return {
+        **semantic,
+        "path_kind": path_kind,
+        "kernel_launch_count_estimate": _flagrand_launch_estimate(case, path_kind),
+        "temporary_bytes": _flagrand_temporary_bytes(case, path_kind),
+        "generator_state_bytes_estimate": _generator_state_bytes_estimate(case.generator),
+    }
+
+
+def _semantic_metadata(case: HostApiCase, backend: str) -> dict[str, Any]:
+    if case.distribution != "poisson_u32":
+        return {
+            "semantic_mode": "strict",
+            "semantic_model": None,
+            "semantic_equivalence": "reference" if backend == "curand_host_api" else "intended_strict",
+        }
+
+    lambda_val = float(case.parameters.get("lambda", 0.0))
+    if backend == "curand_host_api":
+        return {
+            "semantic_mode": "strict",
+            "semantic_model": "strict_poisson",
+            "semantic_equivalence": "reference",
+        }
+    if lambda_val >= 30.0:
+        return {
+            "semantic_mode": "approximation",
+            "semantic_model": "poisson_normal_approximation",
+            "semantic_equivalence": "accepted_approximation",
+        }
+    return {
+        "semantic_mode": "strict",
+        "semantic_model": "poisson_inverse_cdf",
+        "semantic_equivalence": "intended_strict_poisson",
+    }
+
+
+def _flagrand_path_kind(case: HostApiCase) -> str:
+    info = GENERATOR_INFOS[case.generator]
+    distribution = case.distribution
+
+    if distribution in {"raw32", "raw64"}:
+        if info.kind == "qrng" and (case.dimensions or 1) > 1:
+            return "python_dim_loop_raw"
+        if case.generator in {"xorwow", "mrg32k3a", "mt19937", "mtgp32"}:
+            return "chunked_state_raw"
+        return "direct_generator_raw"
+
+    if case.generator == "philox4x32_10" and distribution in {
+        "uniform_f32",
+        "normal_f32",
+        "lognormal_f32",
+        "poisson_u32",
+    }:
+        return "direct_philox_distribution"
+
+    if case.generator == "mtgp32" and distribution == "uniform_f32":
+        return "direct_generator_distribution"
+
+    if info.kind == "qrng" and (case.dimensions or 1) > 1:
+        return "python_dim_loop_raw_plus_transform"
+    if case.generator in {"xorwow", "mrg32k3a", "mt19937", "mtgp32"}:
+        return "chunked_state_raw_plus_transform"
+    return "raw_plus_transform"
+
+
+def _flagrand_launch_estimate(case: HostApiCase, path_kind: str) -> int | None:
+    if path_kind in {"direct_philox_distribution", "direct_generator_distribution", "direct_generator_raw"}:
+        return 1
+    if path_kind == "python_dim_loop_raw":
+        return max(1, int(case.dimensions or 1))
+    if path_kind == "python_dim_loop_raw_plus_transform":
+        return max(1, int(case.dimensions or 1)) + 1
+    if path_kind == "chunked_state_raw":
+        return _chunked_launch_estimate(case.generator, case.n)
+    if path_kind == "chunked_state_raw_plus_transform":
+        return _chunked_launch_estimate(case.generator, case.n) + 1
+    if path_kind == "raw_plus_transform":
+        return 2
+    return None
+
+
+def _flagrand_temporary_bytes(case: HostApiCase, path_kind: str) -> int:
+    if "raw_plus_transform" not in path_kind:
         return 0
     if case.distribution in {"uniform_f32", "normal_f32", "lognormal_f32", "poisson_u32"}:
         return case.n * torch.empty((), dtype=torch.int32).element_size()
     if case.distribution in {"uniform_f64", "normal_f64", "lognormal_f64"}:
         return case.n * torch.empty((), dtype=torch.int64).element_size()
+    return 0
+
+
+def _chunked_launch_estimate(generator: str, n: int) -> int:
+    if generator == "mtgp32":
+        chunk = 192 * 256
+    elif generator in {"xorwow", "mrg32k3a", "mt19937"}:
+        chunk = 1 << 20
+    else:
+        return 1
+    return max(1, (max(1, int(n)) + chunk - 1) // chunk)
+
+
+def _generator_state_bytes_estimate(generator: str) -> int | None:
+    if generator == "mt19937":
+        return 624 * torch.empty((), dtype=torch.int32).element_size()
+    if generator == "mtgp32":
+        return 192 * 1024 * torch.empty((), dtype=torch.int32).element_size()
     return 0
 
 
