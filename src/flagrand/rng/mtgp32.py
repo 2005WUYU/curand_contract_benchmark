@@ -41,6 +41,12 @@ def _mtgp32_temper(r, T):
 
 
 @triton.jit
+def _mtgp32_uint32_to_uniform(x):
+    u = tl.uint_to_uniform_float(x.to(tl.uint32, bitcast=True))
+    return tl.maximum(u, 2.3283064365386963e-10)
+
+
+@triton.jit
 def _mtgp32_kernel(
     out_ptr,
     state_ptr,
@@ -53,6 +59,7 @@ def _mtgp32_kernel(
     NUM_ITERS: tl.constexpr,
     START_ITER: tl.constexpr,
     N_BLOCKS: tl.constexpr,
+    OUTPUT_MODE: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
     STATE_MASK: tl.constexpr,
     MASK: tl.constexpr,
@@ -87,7 +94,10 @@ def _mtgp32_kernel(
 
         out_idx = (k * N_BLOCKS + pid) * BLOCK_SIZE + offs
         out_mask = out_idx < n_elements
-        tl.store(out_ptr + out_idx, o.to(tl.int32, bitcast=True), mask=out_mask)
+        if OUTPUT_MODE == 1:
+            tl.store(out_ptr + out_idx, _mtgp32_uint32_to_uniform(o), mask=out_mask)
+        else:
+            tl.store(out_ptr + out_idx, o.to(tl.int32, bitcast=True), mask=out_mask)
 
         if k + 1 < NUM_ITERS:
             tl.debug_barrier()
@@ -173,16 +183,47 @@ class Mtgp32Generator:
         self.offset = offset_val + n
         return out
 
+    def generate_uniform(
+        self,
+        out: torch.Tensor,
+        *,
+        seed: int | None = None,
+        offset: int | None = None,
+        **kwargs: object,
+    ) -> torch.Tensor:
+        if out.dtype != torch.float32:
+            raise TypeError("MTGP32 generate_uniform requires float32 output.")
+        offset_val = self.offset if offset is None else int(offset)
+        if offset is not None and offset_val != self.offset:
+            raise ValueError("MTGP32 explicit offset override is not supported.")
+        seed_val = self.seed if seed is None else int(seed)
+        block_size = int(kwargs.get("block_size", _MTGP32_BLOCK_SIZE))
+        if block_size != _MTGP32_BLOCK_SIZE:
+            raise ValueError("MTGP32 uses a fixed block_size=256 to preserve per-state dependency ordering.")
+        num_warps = int(kwargs.get("num_warps", 8))
+
+        n = out.numel()
+        if n == 0:
+            return out
+        if seed is not None:
+            raise ValueError("MTGP32 explicit seed override is not supported.")
+
+        self._generate_contiguous(out, seed_val, offset_val, num_warps, output_mode=1)
+        self.offset = offset_val + n
+        return out
+
     def _generate_contiguous(
         self,
         out: torch.Tensor,
         seed_val: int,
         offset_val: int,
         num_warps: int,
+        *,
+        output_mode: int = 0,
     ) -> None:
         flat = out.view(-1)
         device_str = str(out.device)
-        cache_key = (seed_val, device_str, str(out.dtype), num_warps)
+        cache_key = (seed_val, device_str, str(out.dtype), num_warps, output_mode)
         self._ensure_working_state(seed_val, device_str)
 
         written = 0
@@ -208,7 +249,7 @@ class Mtgp32Generator:
                 )
 
             if current % _MTGP32_BLOCK_SIZE != 0:
-                self._cache_one_block(current, out.device, out.dtype, cache_key, device_str, num_warps)
+                self._cache_one_block(current, out.device, out.dtype, cache_key, device_str, num_warps, output_mode)
                 continue
 
             if current % _SEQUENCE_CHUNK == 0 and remaining >= _SEQUENCE_CHUNK:
@@ -222,6 +263,7 @@ class Mtgp32Generator:
                     block_start=0,
                     block_count=_MTGP32_MAX_BLOCKS,
                     chunks=launch_chunks,
+                    output_mode=output_mode,
                 )
                 written += span
                 current += span
@@ -240,13 +282,14 @@ class Mtgp32Generator:
                     block_start=block_start,
                     block_count=block_count,
                     chunks=1,
+                    output_mode=output_mode,
                 )
                 written += span
                 current += span
                 remaining -= span
                 continue
 
-            self._cache_one_block(current, out.device, out.dtype, cache_key, device_str, num_warps)
+            self._cache_one_block(current, out.device, out.dtype, cache_key, device_str, num_warps, output_mode)
 
     def _ensure_working_state(self, seed_val: int, device_str: str) -> None:
         ws_seed = getattr(self, "_ws_seed", None)
@@ -295,6 +338,7 @@ class Mtgp32Generator:
         cache_key: tuple[object, ...],
         device_str: str,
         num_warps: int,
+        output_mode: int,
     ) -> None:
         block_start_element = (current // _MTGP32_BLOCK_SIZE) * _MTGP32_BLOCK_SIZE
         self._advance_to_block_start(block_start_element, device_str, num_warps)
@@ -307,6 +351,7 @@ class Mtgp32Generator:
             block_start=block_start,
             block_count=1,
             chunks=1,
+            output_mode=output_mode,
         )
         setattr(self, "_chunk_cache", cache)
         setattr(self, "_chunk_cache_start", block_start_element)
@@ -332,6 +377,7 @@ class Mtgp32Generator:
                     block_count=_MTGP32_MAX_BLOCKS,
                     chunks=launch_chunks,
                     n_elements=0,
+                    output_mode=0,
                 )
                 skipped = launch_chunks * _MTGP32_MAX_BLOCKS
             else:
@@ -344,6 +390,7 @@ class Mtgp32Generator:
                     block_count=block_count,
                     chunks=1,
                     n_elements=0,
+                    output_mode=0,
                 )
                 skipped = block_count
             blocks_to_skip -= skipped
@@ -359,6 +406,7 @@ class Mtgp32Generator:
         block_count: int,
         chunks: int,
         n_elements: int | None = None,
+        output_mode: int = 0,
     ) -> None:
         if chunks <= 0 or block_count <= 0:
             return
@@ -384,6 +432,7 @@ class Mtgp32Generator:
             int(chunks),
             start_iter,
             block_count,
+            output_mode,
             BLOCK_SIZE=_MTGP32_BLOCK_SIZE,
             STATE_MASK=_MTGP32_STATE_MASK,
             MASK=_MTGP32_MASK,

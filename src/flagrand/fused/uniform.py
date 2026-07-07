@@ -9,6 +9,7 @@ from flagrand.fused._internal.transforms import uint32_to_uniform, uint64_to_uni
 from flagrand.fused._internal.utils import (
     get_generator_type,
     GENERATOR_PHILOX,
+    GENERATOR_MTGP32,
     GENERATOR_SOBOL64,
     GENERATOR_SCRAMBLED_SOBOL64,
     _generate_raw,
@@ -102,6 +103,9 @@ def generate_uniform(
                 f"a multiple of 4, got {n}."
             )
         _generate_philox_uniform(out, generator, block_size, num_warps)
+        return out
+    if not is_64 and gen_type == GENERATOR_MTGP32:
+        generator.generate_uniform(out)
         return out
 
     if is_64:
