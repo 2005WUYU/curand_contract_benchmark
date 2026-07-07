@@ -222,6 +222,7 @@ class Mtgp32Generator:
         if block_size != _MTGP32_BLOCK_SIZE:
             raise ValueError("MTGP32 uses a fixed block_size=256 to preserve per-state dependency ordering.")
         num_warps = int(kwargs.get("num_warps", 8))
+        use_sequence_kernel = bool(kwargs.get("_use_sequence_kernel", False))
 
         n = out.numel()
         if n == 0:
@@ -229,7 +230,7 @@ class Mtgp32Generator:
         if seed is not None:
             raise ValueError("MTGP32 explicit seed override is not supported.")
 
-        self._generate_contiguous(out, seed_val, offset_val, num_warps)
+        self._generate_contiguous(out, seed_val, offset_val, num_warps, use_sequence_kernel)
         self.offset = offset_val + n
         return out
 
@@ -239,6 +240,7 @@ class Mtgp32Generator:
         seed_val: int,
         offset_val: int,
         num_warps: int,
+        use_sequence_kernel: bool,
     ) -> None:
         flat = out.view(-1)
         device_str = str(out.device)
@@ -274,7 +276,12 @@ class Mtgp32Generator:
             full_blocks = remaining // _MTGP32_BLOCK_SIZE
             block_start = (current % _SEQUENCE_CHUNK) // _MTGP32_BLOCK_SIZE
             crosses_chunk = block_start + full_blocks > _MTGP32_MAX_BLOCKS
-            if full_blocks and crosses_chunk and full_blocks <= _MAX_SEQUENCE_BLOCKS_PER_LAUNCH:
+            if (
+                use_sequence_kernel
+                and full_blocks
+                and crosses_chunk
+                and full_blocks <= _MAX_SEQUENCE_BLOCKS_PER_LAUNCH
+            ):
                 span = full_blocks * _MTGP32_BLOCK_SIZE
                 self._generate_block_sequence_into(
                     flat[written : written + span],

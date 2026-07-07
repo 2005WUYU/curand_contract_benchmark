@@ -54,7 +54,10 @@ def _generate_raw(
 ) -> torch.Tensor:
     # Each generator has its own optimal block_size / num_warps; let it pick.
     raw = torch.empty(shape, dtype=torch.int32, device=device)
-    generator.generate(raw)
+    if get_generator_type(generator) == GENERATOR_MTGP32:
+        generator.generate(raw, _use_sequence_kernel=True)
+    else:
+        generator.generate(raw)
     return raw
 
 
