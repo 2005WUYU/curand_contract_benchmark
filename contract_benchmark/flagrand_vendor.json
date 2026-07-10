@@ -1,11 +1,11 @@
 {
   "schema_version": 1,
   "repository": "https://github.com/2005WUYU/FlagRand_RTX4060.git",
-  "commit": "bbb660e5cfda4530033c6cfb6115de58c1278654",
+  "commit": "d7e5fe516d650845b25fdbceb8d46bb2ffdc9c18",
   "package_version": "0.1.0",
   "source_path": "src/flagrand",
   "api_surface": "flagrand.curand",
   "tree_hash_algorithm": "sha256 over sorted .py/.pt files as relative POSIX path + NUL + file bytes",
-  "tree_file_count": 62,
-  "tree_sha256": "2921066fcfc71d4afef0d7497cb076e865fcc3c4fdbec2317b03e179c5f3d2d4"
+  "tree_file_count": 63,
+  "tree_sha256": "740f38d89443c17ae391ae4f58b9e0d36be3286608cf8c31a4a80b5931e601a3"
 }

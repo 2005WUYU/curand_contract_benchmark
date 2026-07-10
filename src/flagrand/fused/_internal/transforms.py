@@ -81,12 +81,12 @@ def uniform_to_normal_trig(u1, u2):
 
 
 @triton.jit
-def uniform_to_normal_trig_f64(u1, u2):
+def uniform_to_normal_fast_f64(u1, u2):
     u1 = tl.maximum(u1, _BOX_MULLER_MIN_U_F64_TL)
     r = tl.sqrt(-2.0 * tl.log(u1))
-    theta = 6.283185307179586 * u2
-    n1 = r * tl.cos(theta)
-    n2 = r * tl.sin(theta)
+    sine, cosine = _sincos_poly_f64(u2)
+    n1 = r * cosine
+    n2 = r * sine
     return n1, n2
 
 
@@ -135,3 +135,46 @@ def _cos_approx_f32(x):
         is_pure=True,
         pack=1,
     )
+
+
+@triton.jit
+def _sincos_poly_f64(unit_angle):
+    quadrant = tl.floor(4.0 * unit_angle + 0.5).to(tl.int32)
+    reduced = (
+        6.283185307179586476925286766559 * unit_angle
+        - 1.5707963267948966192313216916398 * quadrant.to(tl.float64)
+    )
+    squared = reduced * reduced
+
+    sine_coeff = 1.0 / 355687428096000.0
+    sine_coeff = -1.0 / 1307674368000.0 + squared * sine_coeff
+    sine_coeff = 1.0 / 6227020800.0 + squared * sine_coeff
+    sine_coeff = -1.0 / 39916800.0 + squared * sine_coeff
+    sine_coeff = 1.0 / 362880.0 + squared * sine_coeff
+    sine_coeff = -1.0 / 5040.0 + squared * sine_coeff
+    sine_coeff = 1.0 / 120.0 + squared * sine_coeff
+    sine_coeff = -1.0 / 6.0 + squared * sine_coeff
+    sine = reduced + reduced * squared * sine_coeff
+
+    cosine_coeff = 1.0 / 20922789888000.0
+    cosine_coeff = -1.0 / 87178291200.0 + squared * cosine_coeff
+    cosine_coeff = 1.0 / 479001600.0 + squared * cosine_coeff
+    cosine_coeff = -1.0 / 3628800.0 + squared * cosine_coeff
+    cosine_coeff = 1.0 / 40320.0 + squared * cosine_coeff
+    cosine_coeff = -1.0 / 720.0 + squared * cosine_coeff
+    cosine_coeff = 1.0 / 24.0 + squared * cosine_coeff
+    cosine_coeff = -0.5 + squared * cosine_coeff
+    cosine = 1.0 + squared * cosine_coeff
+
+    quadrant = quadrant & 3
+    restored_sine = tl.where(
+        quadrant == 0,
+        sine,
+        tl.where(quadrant == 1, cosine, tl.where(quadrant == 2, -sine, -cosine)),
+    )
+    restored_cosine = tl.where(
+        quadrant == 0,
+        cosine,
+        tl.where(quadrant == 1, -sine, tl.where(quadrant == 2, -cosine, sine)),
+    )
+    return restored_sine, restored_cosine

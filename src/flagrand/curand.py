@@ -5,6 +5,7 @@ from typing import Any
 import torch
 
 from flagrand._curand_fast_path import (
+    is_philox_generator,
     try_generate_lognormal,
     try_generate_normal,
     try_generate_poisson,
@@ -53,11 +54,13 @@ def generate(
     **kwargs: object,
 ) -> torch.Tensor:
     _require_dtype(out, torch.int32, "generate")
-    if (
-        try_generate_stateful_raw(generator, out, kwargs)
-        or try_generate_raw(generator, out, kwargs)
-        or try_generate_quasi_raw(generator, out, kwargs)
-    ):
+    if is_philox_generator(generator):
+        handled = try_generate_raw(generator, out, kwargs)
+    else:
+        handled = try_generate_stateful_raw(generator, out, kwargs) or try_generate_raw(
+            generator, out, kwargs
+        )
+    if handled or try_generate_quasi_raw(generator, out, kwargs):
         return out
     return _generate_raw(out, _engine(generator), **kwargs)
 
@@ -79,11 +82,13 @@ def generate_uniform(
     **kwargs: object,
 ) -> torch.Tensor:
     _require_dtype(out, torch.float32, "generate_uniform")
-    if (
-        try_generate_stateful_uniform(generator, out, kwargs)
-        or try_generate_uniform(generator, out, kwargs)
-        or try_generate_quasi_uniform(generator, out, kwargs)
-    ):
+    if is_philox_generator(generator):
+        handled = try_generate_uniform(generator, out, kwargs)
+    else:
+        handled = try_generate_stateful_uniform(
+            generator, out, kwargs
+        ) or try_generate_uniform(generator, out, kwargs)
+    if handled or try_generate_quasi_uniform(generator, out, kwargs):
         return out
     return _generate_uniform(out, _engine(generator), **kwargs)
 

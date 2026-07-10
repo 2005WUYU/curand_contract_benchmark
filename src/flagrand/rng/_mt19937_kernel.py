@@ -143,6 +143,7 @@ def _mt19937_single_round_kernel(
     s_m = tl.load(state_ptr + state_base + m_idx, mask=state_mask, other=0).to(
         tl.uint32, bitcast=True
     )
+    tl.debug_barrier()
 
     y = (state & upper_mask) | (s_next & lower_mask)
     mag = tl.where((y & one_u32) != zero_u32, matrix_a, zero_u32)
