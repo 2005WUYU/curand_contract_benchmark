@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import torch
 
-from flagrand._device import assert_tensor_device_supported, require_accelerator
+from flagrand._device import assert_tensor_device_supported
 
 
 def prepare_quasi_output(
@@ -14,7 +14,6 @@ def prepare_quasi_output(
     offset: int,
     op_name: str,
 ) -> None:
-    require_accelerator()
     if out.dtype != dtype:
         raise TypeError(f"{op_name} requires {dtype} output.")
     assert_tensor_device_supported(out, op_name=op_name)

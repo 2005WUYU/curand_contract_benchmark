@@ -5,7 +5,8 @@ import triton
 import triton.language as tl
 
 from flagrand.fused._internal.transforms import uniform_to_normal_icdf_f32
-from flagrand.rng._sobol_chunk_tables import chunk_table, optional_device_table, required_bits
+from flagrand.rng._sobol_chunk_tables import launch_plan32
+from flagrand.runtime import CachedKernelLauncher
 
 
 @triton.jit
@@ -100,6 +101,20 @@ def _sobol32_normal_chunk_table_kernel(
     tl.store(out_ptr + dim * points_per_dim + point, y, mask=mask)
 
 
+_SOBOL32_RAW_LAUNCHER = CachedKernelLauncher(
+    _sobol32_chunk_table_kernel,
+    constexpr_names=("CHUNKS", "HAS_SCRAMBLE", "BLOCK"),
+)
+_SOBOL32_UNIFORM_LAUNCHER = CachedKernelLauncher(
+    _sobol32_uniform_chunk_table_kernel,
+    constexpr_names=("CHUNKS", "HAS_SCRAMBLE", "BLOCK"),
+)
+_SOBOL32_NORMAL_LAUNCHER = CachedKernelLauncher(
+    _sobol32_normal_chunk_table_kernel,
+    constexpr_names=("CHUNKS", "HAS_SCRAMBLE", "LOGNORMAL", "BLOCK"),
+)
+
+
 def launch_sobol32_table(
     out: torch.Tensor,
     direction_vectors: torch.Tensor,
@@ -111,20 +126,15 @@ def launch_sobol32_table(
     scramble_constants: torch.Tensor | None = None,
 ) -> None:
     points_per_dim = out.numel() // dimensions
-    chunks = triton.cdiv(required_bits(points_per_dim, offset, 32), 8)
-    chunk_device = chunk_table(direction_vectors, dimensions, chunks, str(out.device), torch.int32)
-    scramble_device = optional_device_table(scramble_constants, str(out.device), torch.int32)
-    grid = (triton.cdiv(points_per_dim, block_size), dimensions)
-    _sobol32_chunk_table_kernel[grid](
-        out.view(-1),
-        chunk_device,
-        scramble_device,
-        points_per_dim,
-        offset,
-        CHUNKS=chunks,
-        HAS_SCRAMBLE=scramble_constants is not None,
-        BLOCK=block_size,
-        num_warps=num_warps,
+    chunk_device, scramble_device, chunks, grid_x = launch_plan32(
+        out, direction_vectors, scramble_constants, dimensions, points_per_dim, offset, block_size
+    )
+    grid = (grid_x, dimensions)
+    _SOBOL32_RAW_LAUNCHER.launch(
+        grid,
+        (out, chunk_device, scramble_device, points_per_dim, offset),
+        (chunks, scramble_constants is not None, block_size),
+        (num_warps,),
     )
 
 
@@ -139,20 +149,15 @@ def launch_sobol32_uniform_table(
     scramble_constants: torch.Tensor | None = None,
 ) -> None:
     points_per_dim = out.numel() // dimensions
-    chunks = triton.cdiv(required_bits(points_per_dim, offset, 32), 8)
-    chunk_device = chunk_table(direction_vectors, dimensions, chunks, str(out.device), torch.int32)
-    scramble_device = optional_device_table(scramble_constants, str(out.device), torch.int32)
-    grid = (triton.cdiv(points_per_dim, block_size), dimensions)
-    _sobol32_uniform_chunk_table_kernel[grid](
-        out.view(-1),
-        chunk_device,
-        scramble_device,
-        points_per_dim,
-        offset,
-        CHUNKS=chunks,
-        HAS_SCRAMBLE=scramble_constants is not None,
-        BLOCK=block_size,
-        num_warps=num_warps,
+    chunk_device, scramble_device, chunks, grid_x = launch_plan32(
+        out, direction_vectors, scramble_constants, dimensions, points_per_dim, offset, block_size
+    )
+    grid = (grid_x, dimensions)
+    _SOBOL32_UNIFORM_LAUNCHER.launch(
+        grid,
+        (out, chunk_device, scramble_device, points_per_dim, offset),
+        (chunks, scramble_constants is not None, block_size),
+        (num_warps,),
     )
 
 
@@ -170,21 +175,13 @@ def launch_sobol32_normal_table(
     scramble_constants: torch.Tensor | None = None,
 ) -> None:
     points_per_dim = out.numel() // dimensions
-    chunks = triton.cdiv(required_bits(points_per_dim, offset, 32), 8)
-    chunk_device = chunk_table(direction_vectors, dimensions, chunks, str(out.device), torch.int32)
-    scramble_device = optional_device_table(scramble_constants, str(out.device), torch.int32)
-    grid = (triton.cdiv(points_per_dim, block_size), dimensions)
-    _sobol32_normal_chunk_table_kernel[grid](
-        out.view(-1),
-        chunk_device,
-        scramble_device,
-        points_per_dim,
-        offset,
-        mean,
-        stddev,
-        CHUNKS=chunks,
-        HAS_SCRAMBLE=scramble_constants is not None,
-        LOGNORMAL=lognormal,
-        BLOCK=block_size,
-        num_warps=num_warps,
+    chunk_device, scramble_device, chunks, grid_x = launch_plan32(
+        out, direction_vectors, scramble_constants, dimensions, points_per_dim, offset, block_size
+    )
+    grid = (grid_x, dimensions)
+    _SOBOL32_NORMAL_LAUNCHER.launch(
+        grid,
+        (out, chunk_device, scramble_device, points_per_dim, offset, mean, stddev),
+        (chunks, scramble_constants is not None, lognormal, block_size),
+        (num_warps,),
     )

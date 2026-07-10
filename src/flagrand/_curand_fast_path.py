@@ -49,16 +49,21 @@ _STATE_POISSON = {
     CURAND_RNG_PSEUDO_XORWOW: generate_xorwow_poisson_u32,
     CURAND_RNG_PSEUDO_MRG32K3A: generate_mrg32k3a_poisson_u32,
 }
+_DIRECT_TYPES = {
+    CURAND_RNG_PSEUDO_PHILOX4_32_10,
+    CURAND_RNG_PSEUDO_XORWOW,
+    CURAND_RNG_PSEUDO_MRG32K3A,
+}
 
 
 def try_generate_raw(generator, out: torch.Tensor, kwargs: dict[str, object]) -> bool:
     direct = _direct_engine(generator)
-    if direct is None:
+    if direct is None or direct[0] not in _DIRECT_TYPES:
         return False
     config = _launch_config(kwargs)
     if config is None or not _supports_direct_output(out):
         return False
-    if direct[0] == CURAND_RNG_PSEUDO_PHILOX4_32_10:
+    if direct[0] == CURAND_RNG_PSEUDO_PHILOX4_32_10 and out.dtype == torch.int32:
         generate_philox_raw_u32(
             out,
             direct[1],
@@ -66,7 +71,7 @@ def try_generate_raw(generator, out: torch.Tensor, kwargs: dict[str, object]) ->
             num_warps=config[1],
         )
         return True
-    if direct[0] in _STATE_UNIFORM:
+    if direct[0] in _STATE_UNIFORM and out.dtype == torch.int32:
         direct[1].generate(out)
         return True
     return False
@@ -179,7 +184,7 @@ def try_generate_poisson(
 
 def _prepare(generator, out, kwargs):
     direct = _direct_engine(generator)
-    if direct is None:
+    if direct is None or direct[0] not in _DIRECT_TYPES:
         return None
     config = _launch_config(kwargs)
     if config is None or not _supports_direct_output(out):
