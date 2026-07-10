@@ -7,6 +7,7 @@ import triton
 import triton.language as tl
 
 from flagrand.rng._sequence import generate_chunked
+from flagrand.runtime import CachedKernelLauncher
 
 _BLOCK: int = 128
 _TARGET_THREADS: int = 131072
@@ -76,6 +77,12 @@ def _xorwow_kernel(
         tl.store(out_ptr + out_offs, output, mask=out_mask)
 
 
+_XORWOW_LAUNCHER = CachedKernelLauncher(
+    _xorwow_kernel,
+    constexpr_names=("BLOCK",),
+)
+
+
 @dataclass
 class XorwowGenerator:
     seed: int = 0
@@ -132,14 +139,17 @@ def _launch_xorwow(out: torch.Tensor, seed_val: int, offset_val: int) -> None:
     seed_hi = (seed_val >> 32) & 0xFFFFFFFF
     out_u32 = out.view(-1).view(torch.uint32)
 
-    _xorwow_kernel[grid](
-        out_u32,
-        seed_lo,
-        seed_hi,
-        offset_val & 0xFFFFFFFF,
-        n,
-        n_threads,
-        num_iters,
-        BLOCK=_BLOCK,
-        num_warps=4,
+    _XORWOW_LAUNCHER.launch(
+        grid,
+        (
+            out_u32,
+            seed_lo,
+            seed_hi,
+            offset_val & 0xFFFFFFFF,
+            n,
+            n_threads,
+            num_iters,
+        ),
+        (_BLOCK,),
+        (4,),
     )

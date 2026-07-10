@@ -7,6 +7,7 @@ import triton
 import triton.language as tl
 
 from flagrand.rng._sequence import generate_chunked
+from flagrand.runtime import CachedKernelLauncher
 
 _BLOCK: int = 128
 _TARGET_THREADS: int = 131072
@@ -89,6 +90,12 @@ def _mrg32k3a_kernel(
         tl.store(out_ptr + out_offs, output_u32.to(tl.int32, bitcast=True), mask=out_mask)
 
 
+_MRG32K3A_LAUNCHER = CachedKernelLauncher(
+    _mrg32k3a_kernel,
+    constexpr_names=("BLOCK",),
+)
+
+
 @dataclass
 class Mrg32k3aGenerator:
     seed: int = 0
@@ -141,13 +148,16 @@ def _launch_mrg32k3a(out: torch.Tensor, seed_val: int, offset_val: int) -> None:
     num_iters = (n + n_threads - 1) // n_threads
     grid = ((n_threads + _BLOCK - 1) // _BLOCK,)
 
-    _mrg32k3a_kernel[grid](
-        out.view(-1),
-        seed_val & 0xFFFFFFFF,
-        offset_val & 0xFFFFFFFF,
-        n,
-        n_threads,
-        num_iters,
-        BLOCK=_BLOCK,
-        num_warps=4,
+    _MRG32K3A_LAUNCHER.launch(
+        grid,
+        (
+            out,
+            seed_val & 0xFFFFFFFF,
+            offset_val & 0xFFFFFFFF,
+            n,
+            n_threads,
+            num_iters,
+        ),
+        (_BLOCK,),
+        (4,),
     )

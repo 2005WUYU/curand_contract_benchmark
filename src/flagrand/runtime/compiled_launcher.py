@@ -7,34 +7,21 @@ from triton import knobs
 from triton.runtime.driver import driver
 
 from flagrand.runtime.specialization import (
-    Constraint,
-    build_constraints,
-    matches_constraints,
-    runtime_positions,
+    bind_specialization,
+    find_matching_entry,
+    value_tokens,
 )
 
 
-@dataclass(frozen=True)
+@dataclass
 class _LaunchEntry:
     compiled: Any
     device: int
-    constexpr_values: tuple[object, ...]
-    option_values: tuple[object, ...]
-    constraints: tuple[Constraint, ...]
-    runtime_positions: tuple[int, ...]
+    binder: Any
+    specialization: tuple[object, ...]
+    parsed_options: object
+    value_tokens: tuple[tuple[object, ...], ...]
     launch_metadata: object
-
-    def matches(
-        self,
-        values: tuple[object, ...],
-        constexpr_values: tuple[object, ...],
-        option_values: tuple[object, ...],
-    ) -> bool:
-        return bool(
-            self.constexpr_values == constexpr_values
-            and self.option_values == option_values
-            and matches_constraints(values, self.constraints)
-        )
 
 
 class CachedKernelLauncher:
@@ -64,9 +51,14 @@ class CachedKernelLauncher:
         grid3 = _normalize_grid(grid)
         values = args + constexpr_values
         if not _requires_regular_jit(self._kernel):
-            for entry in self._entries:
-                if entry.matches(values, constexpr_values, option_values):
-                    return _launch_entry(entry, grid3, values)
+            entry = find_matching_entry(
+                self._entries,
+                values,
+                self._option_names,
+                option_values,
+            )
+            if entry is not None:
+                return _launch_entry(entry, grid3, values)
         return self._compile_and_launch(
             grid3,
             args,
@@ -94,19 +86,24 @@ class CachedKernelLauncher:
         if compiled is None or _requires_regular_jit(self._kernel):
             return compiled
 
-        positions = runtime_positions(compiled)
-        runtime_args = tuple(values[index] for index in positions)
         device = driver.active.get_current_device()
         stream = driver.active.get_current_stream(device)
         compiled._init_handles()
+        binder = self._kernel.device_caches[device][4]
+        specialization, parsed_options = bind_specialization(
+            binder,
+            values,
+            self._option_names,
+            option_values,
+        )
         entry = _LaunchEntry(
             compiled=compiled,
             device=device,
-            constexpr_values=constexpr_values,
-            option_values=option_values,
-            constraints=build_constraints(compiled, values),
-            runtime_positions=positions,
-            launch_metadata=compiled.launch_metadata(grid3, stream, *runtime_args),
+            binder=binder,
+            specialization=specialization,
+            parsed_options=parsed_options,
+            value_tokens=value_tokens(values),
+            launch_metadata=compiled.launch_metadata(grid3, stream, *values),
         )
         self._entries.insert(0, entry)
         del self._entries[self._max_entries :]
@@ -120,7 +117,6 @@ def _launch_entry(
 ) -> Any:
     compiled = entry.compiled
     stream = driver.active.get_current_stream(entry.device)
-    runtime_args = tuple(values[index] for index in entry.runtime_positions)
     compiled.run(
         grid[0],
         grid[1],
@@ -131,7 +127,7 @@ def _launch_entry(
         entry.launch_metadata,
         None,
         None,
-        *runtime_args,
+        *values,
     )
     return compiled
 
