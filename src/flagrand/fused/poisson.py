@@ -127,12 +127,10 @@ def generate_poisson(
         raise ValueError(f"generate_poisson: num_warps must be > 0, got {num_warps}.")
 
     if not is_64 and gen_type == GENERATOR_PHILOX:
-        max_k = _small_poisson_max_k(lambda_val) if lambda_val < 30.0 else 0
         generate_philox_poisson_u32(
             out,
             generator,
             lambda_val=lambda_val,
-            max_k=max_k,
             block_size=block_size,
             num_warps=num_warps,
         )

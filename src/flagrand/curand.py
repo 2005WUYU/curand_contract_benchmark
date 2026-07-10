@@ -27,6 +27,18 @@ from flagrand.fused import (
     generate_raw as _generate_raw,
     generate_uniform as _generate_uniform,
 )
+from flagrand.fused._internal.philox_direct import (
+    generate_philox_lognormal_f32,
+    generate_philox_normal_f32,
+    generate_philox_poisson_u32,
+    generate_philox_uniform_f32,
+)
+from flagrand.fused._internal.philox_direct_f64 import (
+    generate_philox_lognormal_f64,
+    generate_philox_normal_f64,
+    generate_philox_uniform_f64,
+)
+from flagrand.rng.philox import generate_philox_raw_u32
 
 
 def generate(
@@ -35,6 +47,16 @@ def generate(
     **kwargs: object,
 ) -> torch.Tensor:
     _require_dtype(out, torch.int32, "generate")
+    engine = _fast_philox_engine(generator)
+    if engine is not None:
+        config = _fast_launch_config(kwargs)
+        if config is not None and _supports_fast_output(out):
+            return generate_philox_raw_u32(
+                out,
+                engine,
+                block_size=config[0],
+                num_warps=config[1],
+            )
     return _generate_raw(out, _engine(generator), **kwargs)
 
 
@@ -53,6 +75,19 @@ def generate_uniform(
     **kwargs: object,
 ) -> torch.Tensor:
     _require_dtype(out, torch.float32, "generate_uniform")
+    engine = _fast_philox_engine(generator)
+    if engine is not None:
+        config = _fast_launch_config(kwargs)
+        if config is not None and _supports_fast_output(out):
+            if out.numel() == 0:
+                return out
+            generate_philox_uniform_f32(
+                out,
+                engine,
+                block_size=config[0],
+                num_warps=config[1],
+            )
+            return out
     return _generate_uniform(out, _engine(generator), **kwargs)
 
 
@@ -62,6 +97,19 @@ def generate_uniform_double(
     **kwargs: object,
 ) -> torch.Tensor:
     _require_dtype(out, torch.float64, "generate_uniform_double")
+    engine = _fast_philox_engine(generator)
+    if engine is not None:
+        config = _fast_launch_config(kwargs)
+        if config is not None and _supports_fast_output(out):
+            if out.numel() == 0:
+                return out
+            generate_philox_uniform_f64(
+                out,
+                engine,
+                block_size=config[0],
+                num_warps=config[1],
+            )
+            return out
     return _generate_uniform(out, _engine(generator), **kwargs)
 
 
@@ -74,6 +122,21 @@ def generate_normal(
     **kwargs: object,
 ) -> torch.Tensor:
     _require_dtype(out, torch.float32, "generate_normal")
+    engine = _fast_philox_engine(generator)
+    if engine is not None:
+        config = _fast_launch_config(kwargs)
+        if config is not None and _supports_fast_output(out):
+            if out.numel() == 0:
+                return out
+            generate_philox_normal_f32(
+                out,
+                engine,
+                mean=mean,
+                stddev=stddev,
+                block_size=config[0],
+                num_warps=config[1],
+            )
+            return out
     return _generate_normal(out, _engine(generator), mean=mean, stddev=stddev, **kwargs)
 
 
@@ -86,6 +149,21 @@ def generate_normal_double(
     **kwargs: object,
 ) -> torch.Tensor:
     _require_dtype(out, torch.float64, "generate_normal_double")
+    engine = _fast_philox_engine(generator)
+    if engine is not None:
+        config = _fast_launch_config(kwargs)
+        if config is not None and _supports_fast_output(out):
+            if out.numel() == 0:
+                return out
+            generate_philox_normal_f64(
+                out,
+                engine,
+                mean=mean,
+                stddev=stddev,
+                block_size=config[0],
+                num_warps=config[1],
+            )
+            return out
     return _generate_normal(out, _engine(generator), mean=mean, stddev=stddev, **kwargs)
 
 
@@ -98,6 +176,21 @@ def generate_lognormal(
     **kwargs: object,
 ) -> torch.Tensor:
     _require_dtype(out, torch.float32, "generate_lognormal")
+    engine = _fast_philox_engine(generator)
+    if engine is not None:
+        config = _fast_launch_config(kwargs)
+        if config is not None and _supports_fast_output(out):
+            if out.numel() == 0:
+                return out
+            generate_philox_lognormal_f32(
+                out,
+                engine,
+                mean=mean,
+                stddev=stddev,
+                block_size=config[0],
+                num_warps=config[1],
+            )
+            return out
     return _generate_lognormal(out, _engine(generator), mean=mean, stddev=stddev, **kwargs)
 
 
@@ -110,6 +203,21 @@ def generate_lognormal_double(
     **kwargs: object,
 ) -> torch.Tensor:
     _require_dtype(out, torch.float64, "generate_lognormal_double")
+    engine = _fast_philox_engine(generator)
+    if engine is not None:
+        config = _fast_launch_config(kwargs)
+        if config is not None and _supports_fast_output(out):
+            if out.numel() == 0:
+                return out
+            generate_philox_lognormal_f64(
+                out,
+                engine,
+                mean=mean,
+                stddev=stddev,
+                block_size=config[0],
+                num_warps=config[1],
+            )
+            return out
     return _generate_lognormal(out, _engine(generator), mean=mean, stddev=stddev, **kwargs)
 
 
@@ -121,7 +229,46 @@ def generate_poisson(
     **kwargs: object,
 ) -> torch.Tensor:
     _require_dtype(out, torch.int32, "generate_poisson")
+    engine = _fast_philox_engine(generator)
+    if engine is not None:
+        config = _fast_launch_config(kwargs)
+        if config is not None and _supports_fast_output(out):
+            if out.numel() == 0:
+                return out
+            generate_philox_poisson_u32(
+                out,
+                engine,
+                lambda_val=lambda_val,
+                block_size=config[0],
+                num_warps=config[1],
+            )
+            return out
     return _generate_poisson(out, _engine(generator), lambda_val=lambda_val, **kwargs)
+
+
+def _fast_philox_engine(generator: CurandGenerator | Any) -> object | None:
+    if (
+        isinstance(generator, CurandGenerator)
+        and generator.rng_type == CURAND_RNG_PSEUDO_PHILOX4_32_10
+    ):
+        return generator.engine
+    return None
+
+
+def _fast_launch_config(kwargs: dict[str, object]) -> tuple[int, int] | None:
+    if any(name not in {"block_size", "num_warps"} for name in kwargs):
+        return None
+    block_size = kwargs.get("block_size", 512)
+    num_warps = kwargs.get("num_warps", 4)
+    if not isinstance(block_size, int) or block_size <= 0:
+        raise ValueError(f"block_size must be a positive integer, got {block_size!r}.")
+    if not isinstance(num_warps, int) or num_warps <= 0:
+        raise ValueError(f"num_warps must be a positive integer, got {num_warps!r}.")
+    return block_size, num_warps
+
+
+def _supports_fast_output(out: torch.Tensor) -> bool:
+    return out.device.type == "cuda" and out.is_contiguous()
 
 
 def _engine(generator: CurandGenerator | Any) -> object:

@@ -7,6 +7,7 @@ import torch
 import triton
 import triton.language as tl
 
+from flagrand.runtime import CachedKernelLauncher
 from flagrand.fused._internal.transforms import uint32_to_uniform
 
 
@@ -59,6 +60,12 @@ def _philox_poisson_table_u32_kernel(
     tl.store(out_ptr + base, k, mask=mask[:, None] & (base < n))
 
 
+_PHILOX_POISSON_TABLE_LAUNCHER = CachedKernelLauncher(
+    _philox_poisson_table_u32_kernel,
+    constexpr_names=("BLOCK", "STEPS"),
+)
+
+
 def generate_philox_poisson_table_u32(
     out: torch.Tensor,
     *,
@@ -70,18 +77,12 @@ def generate_philox_poisson_table_u32(
 ) -> None:
     table = _cdf_table(lambda_val, str(out.device))
     n_counters = triton.cdiv(out.numel(), 4)
-    grid = (triton.cdiv(n_counters, block_size),)
-    _philox_poisson_table_u32_kernel[grid](
-        out.view(-1),
-        table,
-        table.numel(),
-        seed,
-        offset // 4,
-        out.numel(),
-        n_counters,
-        BLOCK=block_size,
-        STEPS=math.ceil(math.log2(table.numel())),
-        num_warps=num_warps,
+    grid = triton.cdiv(n_counters, block_size)
+    _PHILOX_POISSON_TABLE_LAUNCHER.launch(
+        grid,
+        (out, table, table.numel(), seed, offset // 4, out.numel(), n_counters),
+        (block_size, math.ceil(math.log2(table.numel()))),
+        (num_warps,),
     )
 
 
