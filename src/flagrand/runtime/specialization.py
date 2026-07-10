@@ -1,114 +1,110 @@
 from __future__ import annotations
 
+from typing import Any
+import weakref
+
 import torch
+from triton.runtime.driver import driver
 
 
-Constraint = tuple[object, ...]
-
-_TENSOR = 0
-_INTEGER = 1
-_FLOAT = 2
-_EXACT = 3
-_OTHER = 4
-
-
-def build_constraints(compiled, values: tuple[object, ...]) -> tuple[Constraint, ...]:
-    signature_items = tuple(compiled.src.signature.items())
-    if len(signature_items) != len(values):
-        raise RuntimeError("compiled Triton signature does not match launcher arguments")
-    return tuple(
-        _constraint_for(
-            value,
-            signature,
-            compiled.src.attrs.get((index,), ()),
-        )
-        for index, (value, (_, signature)) in enumerate(zip(values, signature_items))
-    )
-
-
-def runtime_positions(compiled) -> tuple[int, ...]:
-    return tuple(
-        index
-        for index, (_, signature) in enumerate(compiled.src.signature.items())
-        if signature != "constexpr"
-    )
-
-
-def matches_constraints(
+def find_matching_entry(
+    entries: list[Any],
     values: tuple[object, ...],
-    constraints: tuple[Constraint, ...],
+    option_names: tuple[str, ...],
+    option_values: tuple[object, ...],
+) -> Any | None:
+    for entry in entries:
+        if _matches_hot_entry(entry, values, option_names, option_values):
+            return entry
+
+    device = _argument_device(values)
+    candidates = [entry for entry in entries if entry.device == device]
+    if not candidates:
+        return None
+    specialization, parsed_options = bind_specialization(
+        candidates[0].binder,
+        values,
+        option_names,
+        option_values,
+    )
+    for entry in candidates:
+        if entry.specialization == specialization and entry.parsed_options == parsed_options:
+            entry.value_tokens = value_tokens(values)
+            return entry
+    return None
+
+
+def bind_specialization(
+    binder: Any,
+    values: tuple[object, ...],
+    option_names: tuple[str, ...],
+    option_values: tuple[object, ...],
+) -> tuple[tuple[object, ...], object]:
+    if option_names == ("num_warps",):
+        _, specialization, parsed_options = binder(
+            *values,
+            num_warps=option_values[0],
+        )
+    else:
+        options = dict(zip(option_names, option_values))
+        _, specialization, parsed_options = binder(*values, **options)
+    return tuple(specialization), parsed_options
+
+
+def value_tokens(values: tuple[object, ...]) -> tuple[tuple[object, ...], ...]:
+    return tuple(
+        ("tensor", weakref.ref(value), value.data_ptr())
+        if isinstance(value, torch.Tensor)
+        else ("value", value)
+        for value in values
+    )
+
+
+def _matches_hot_entry(
+    entry: Any,
+    values: tuple[object, ...],
+    option_names: tuple[str, ...],
+    option_values: tuple[object, ...],
 ) -> bool:
-    for value, constraint in zip(values, constraints):
-        kind = constraint[0]
-        if kind == _EXACT:
-            if value != constraint[1]:
+    if len(values) != len(entry.value_tokens):
+        return False
+    if option_names != ("num_warps",) or not isinstance(entry.parsed_options, dict):
+        return False
+    if entry.parsed_options.get("num_warps") != option_values[0]:
+        return False
+    for value, token, component in zip(values, entry.value_tokens, entry.specialization):
+        if token[0] == "tensor":
+            if token[1]() is not value or value.data_ptr() != token[2]:
                 return False
             continue
-        if kind == _TENSOR:
-            if not isinstance(value, torch.Tensor):
-                return False
-            _, dtype, device_type, device_index, divisor = constraint
-            if (
-                value.dtype != dtype
-                or value.device.type != device_type
-                or value.device.index != device_index
-                or (divisor and value.data_ptr() % int(divisor) != 0)
-            ):
-                return False
+        if value == token[1]:
             continue
-        if kind == _INTEGER:
-            if isinstance(value, bool) or not isinstance(value, int):
-                return False
-            _, signature, divisor = constraint
-            if not _integer_fits(value, str(signature)) or (
-                divisor and value % int(divisor) != 0
-            ):
-                return False
-            continue
-        if kind == _FLOAT:
-            if not isinstance(value, float):
-                return False
-            continue
-        if not isinstance(value, constraint[1]):
+        if not _matches_changed_value(value, component):
             return False
     return True
 
 
-def _constraint_for(value: object, signature: str, attrs: object) -> Constraint:
-    if signature == "constexpr":
-        return (_EXACT, value)
-    divisor = _divisibility(attrs)
-    if isinstance(value, torch.Tensor):
-        return (
-            _TENSOR,
-            value.dtype,
-            value.device.type,
-            value.device.index,
-            divisor,
-        )
-    if isinstance(value, bool):
-        return (_EXACT, value)
-    if isinstance(value, int):
-        return (_INTEGER, signature, divisor)
-    if isinstance(value, float):
-        return (_FLOAT, signature)
-    return (_OTHER, type(value))
-
-
-def _divisibility(attrs: object) -> int:
-    for attr in attrs:
-        if len(attr) == 2 and attr[0] == "tt.divisibility":
-            return int(attr[1])
-    return 0
-
-
-def _integer_fits(value: int, signature: str) -> bool:
+def _matches_changed_value(value: object, component: tuple[object, ...]) -> bool:
+    signature = component[0]
     if signature == "i32":
-        return -(1 << 31) <= value < (1 << 31)
-    if signature == "u32":
-        return 0 <= value < (1 << 32)
-    if signature == "i64":
-        return -(1 << 63) <= value < (1 << 63)
-    if signature == "u64":
-        return 0 <= value < (1 << 64)
-    return False
+        matches_type = isinstance(value, int) and -(1 << 31) <= value < (1 << 31)
+    elif signature == "u32":
+        matches_type = isinstance(value, int) and 0 <= value < (1 << 32)
+    elif signature == "i64":
+        matches_type = isinstance(value, int) and -(1 << 63) <= value < (1 << 63)
+    elif signature == "u64":
+        matches_type = isinstance(value, int) and 0 <= value < (1 << 64)
+    elif signature in {"fp32", "fp64"}:
+        return isinstance(value, float)
+    else:
+        return False
+    if not matches_type or isinstance(value, bool):
+        return False
+    return len(component) < 2 or component[1] != "D" or value % 16 == 0
+
+
+def _argument_device(values: tuple[object, ...]) -> int:
+    for value in values:
+        if isinstance(value, torch.Tensor) and value.device.index is not None:
+            return value.device.index
+    return driver.active.get_current_device()

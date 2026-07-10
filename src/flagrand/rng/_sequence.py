@@ -32,6 +32,20 @@ def generate_chunked(
     current = int(start)
     remaining = flat.numel()
 
+    cache = getattr(owner, "_chunk_cache", None)
+    cache_start = int(getattr(owner, "_chunk_cache_start", -1))
+    if (
+        cache is not None
+        and getattr(owner, "_chunk_cache_key", None) == cache_key
+        and cache_start <= current
+    ):
+        cache_offset = current - cache_start
+        if remaining <= cache.numel() - cache_offset:
+            flat.copy_(cache[cache_offset : cache_offset + remaining])
+            if cache_offset + remaining == cache.numel():
+                clear_chunk_cache(owner)
+            return
+
     while remaining:
         cache = getattr(owner, "_chunk_cache", None)
         cache_start = int(getattr(owner, "_chunk_cache_start", -1))

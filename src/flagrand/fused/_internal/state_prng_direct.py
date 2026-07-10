@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import torch
-import triton
 
 from flagrand.fused._internal.state_prng_kernels import (
     normal_kernel,
@@ -10,9 +9,27 @@ from flagrand.fused._internal.state_prng_kernels import (
     uniform_kernel,
 )
 from flagrand.fused._internal.state_prng_state import RNG_MRG32K3A, RNG_XORWOW
+from flagrand.runtime import CachedKernelLauncher
 
 _BLOCK: int = 128
 _TARGET_THREADS: int = 131072
+
+_UNIFORM_LAUNCHER = CachedKernelLauncher(
+    uniform_kernel,
+    constexpr_names=("BLOCK", "RNG_KIND"),
+)
+_NORMAL_LAUNCHER = CachedKernelLauncher(
+    normal_kernel,
+    constexpr_names=("LOGNORMAL", "BLOCK", "RNG_KIND"),
+)
+_POISSON_SMALL_LAUNCHER = CachedKernelLauncher(
+    poisson_small_kernel,
+    constexpr_names=("BLOCK", "MAX_K", "RNG_KIND"),
+)
+_POISSON_LARGE_LAUNCHER = CachedKernelLauncher(
+    poisson_large_kernel,
+    constexpr_names=("BLOCK", "RNG_KIND"),
+)
 
 
 def generate_xorwow_uniform_f32(out: torch.Tensor, generator) -> None:
@@ -51,18 +68,20 @@ def _launch_uniform(out: torch.Tensor, generator, rng_kind: int, op_name: str) -
     seed_lo, seed_hi, offset_val = _launch_seed_args(generator, op_name)
     n = out.numel()
     n_threads, num_iters = _thread_plan(n)
-    grid = (triton.cdiv(n_threads, _BLOCK),)
-    uniform_kernel[grid](
-        out.view(-1),
-        seed_lo,
-        seed_hi,
-        offset_val & 0xFFFFFFFF,
-        n,
-        n_threads,
-        num_iters,
-        BLOCK=_BLOCK,
-        RNG_KIND=rng_kind,
-        num_warps=4,
+    grid = (_ceil_div(n_threads, _BLOCK),)
+    _UNIFORM_LAUNCHER.launch(
+        grid,
+        (
+            out,
+            seed_lo,
+            seed_hi,
+            offset_val & 0xFFFFFFFF,
+            n,
+            n_threads,
+            num_iters,
+        ),
+        (_BLOCK, rng_kind),
+        (4,),
     )
     generator.offset = offset_val + n
 
@@ -80,21 +99,22 @@ def _launch_normal(
     seed_lo, seed_hi, offset_val = _launch_seed_args(generator, op_name)
     n_pairs = out.numel() // 2
     n_threads, num_iters = _thread_plan(n_pairs)
-    grid = (triton.cdiv(n_threads, _BLOCK),)
-    normal_kernel[grid](
-        out.view(-1),
-        seed_lo,
-        seed_hi,
-        offset_val & 0xFFFFFFFF,
-        n_pairs,
-        n_threads,
-        num_iters,
-        mean,
-        stddev,
-        LOGNORMAL=lognormal,
-        BLOCK=_BLOCK,
-        RNG_KIND=rng_kind,
-        num_warps=4,
+    grid = (_ceil_div(n_threads, _BLOCK),)
+    _NORMAL_LAUNCHER.launch(
+        grid,
+        (
+            out,
+            seed_lo,
+            seed_hi,
+            offset_val & 0xFFFFFFFF,
+            n_pairs,
+            n_threads,
+            num_iters,
+            mean,
+            stddev,
+        ),
+        (lognormal, _BLOCK, rng_kind),
+        (4,),
     )
     generator.offset = offset_val + out.numel()
 
@@ -111,46 +131,53 @@ def _launch_poisson(
     if lambda_val < 30.0:
         n = out.numel()
         n_threads, num_iters = _thread_plan(n)
-        grid = (triton.cdiv(n_threads, _BLOCK),)
-        poisson_small_kernel[grid](
-            out.view(-1),
-            seed_lo,
-            seed_hi,
-            offset_val & 0xFFFFFFFF,
-            n,
-            n_threads,
-            num_iters,
-            lambda_val,
-            BLOCK=_BLOCK,
-            MAX_K=max_k,
-            RNG_KIND=rng_kind,
-            num_warps=4,
+        grid = (_ceil_div(n_threads, _BLOCK),)
+        _POISSON_SMALL_LAUNCHER.launch(
+            grid,
+            (
+                out,
+                seed_lo,
+                seed_hi,
+                offset_val & 0xFFFFFFFF,
+                n,
+                n_threads,
+                num_iters,
+                lambda_val,
+            ),
+            (_BLOCK, max_k, rng_kind),
+            (4,),
         )
     else:
         n_pairs = out.numel() // 2
         n_threads, num_iters = _thread_plan(n_pairs)
-        grid = (triton.cdiv(n_threads, _BLOCK),)
-        poisson_large_kernel[grid](
-            out.view(-1),
-            seed_lo,
-            seed_hi,
-            offset_val & 0xFFFFFFFF,
-            n_pairs,
-            n_threads,
-            num_iters,
-            lambda_val,
-            BLOCK=_BLOCK,
-            RNG_KIND=rng_kind,
-            num_warps=4,
+        grid = (_ceil_div(n_threads, _BLOCK),)
+        _POISSON_LARGE_LAUNCHER.launch(
+            grid,
+            (
+                out,
+                seed_lo,
+                seed_hi,
+                offset_val & 0xFFFFFFFF,
+                n_pairs,
+                n_threads,
+                num_iters,
+                lambda_val,
+            ),
+            (_BLOCK, rng_kind),
+            (4,),
         )
     generator.offset = offset_val + out.numel()
 
 
 def _thread_plan(n_work_items: int) -> tuple[int, int]:
-    n_threads = min(_TARGET_THREADS, triton.cdiv(n_work_items, _BLOCK) * _BLOCK)
+    n_threads = min(_TARGET_THREADS, _ceil_div(n_work_items, _BLOCK) * _BLOCK)
     n_threads = max(n_threads, _BLOCK)
-    num_iters = triton.cdiv(n_work_items, n_threads)
+    num_iters = _ceil_div(n_work_items, n_threads)
     return n_threads, num_iters
+
+
+def _ceil_div(numerator: int, denominator: int) -> int:
+    return (numerator + denominator - 1) // denominator
 
 
 def _launch_seed_args(generator, op_name: str) -> tuple[int, int, int]:
