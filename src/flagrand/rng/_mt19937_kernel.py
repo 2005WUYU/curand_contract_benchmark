@@ -5,6 +5,13 @@ import triton
 import triton.language as tl
 
 from flagrand.rng._mt19937_data import MT19937_M, MT19937_N
+from flagrand.rng._stateful_output import (
+    StatefulOutput,
+    transform_normal_u32,
+    transform_poisson_large_u32,
+    transform_poisson_small_u32,
+)
+from flagrand.runtime import CachedKernelLauncher
 
 
 @triton.jit
@@ -29,12 +36,16 @@ def _mt19937_blocks_kernel(
     state_ptr,
     scratch_ptr,
     n_elements,
-    NUM_ROUNDS: tl.constexpr,
     n_blocks,
+    mean,
+    stddev,
+    lambda_val,
+    NUM_ROUNDS: tl.constexpr,
     OUTPUT_MODE: tl.constexpr,
     N: tl.constexpr,
     BLOCK_STATE: tl.constexpr,
     M: tl.constexpr,
+    MAX_K: tl.constexpr,
 ):
     stream_id = tl.program_id(0)
     state_base = stream_id * N
@@ -74,8 +85,19 @@ def _mt19937_blocks_kernel(
         out_mask = state_mask & (out_offsets < n_elements)
         if OUTPUT_MODE == 1:
             tl.store(out_ptr + out_offsets, _mt19937_uint32_to_uniform(tempered), mask=out_mask)
-        else:
+        elif OUTPUT_MODE == 0:
             tl.store(out_ptr + out_offsets, tempered.to(tl.int32, bitcast=True), mask=out_mask)
+        elif OUTPUT_MODE == 2 or OUTPUT_MODE == 3:
+            transformed = transform_normal_u32(
+                tempered, mean, stddev, OUTPUT_MODE == 3, BLOCK_STATE
+            )
+            tl.store(out_ptr + out_offsets, transformed, mask=out_mask)
+        elif OUTPUT_MODE == 4:
+            transformed = transform_poisson_small_u32(tempered, lambda_val, MAX_K)
+            tl.store(out_ptr + out_offsets, transformed, mask=out_mask)
+        else:
+            transformed = transform_poisson_large_u32(tempered, lambda_val, BLOCK_STATE)
+            tl.store(out_ptr + out_offsets, transformed, mask=out_mask)
 
         if round_idx + 1 < NUM_ROUNDS:
             tl.debug_barrier()
@@ -87,11 +109,15 @@ def _mt19937_blocks_kernel(
 def _mt19937_single_round_kernel(
     out_ptr,
     state_ptr,
+    mean,
+    stddev,
+    lambda_val,
     OUTPUT_MODE: tl.constexpr,
     WRITE_OUTPUT: tl.constexpr,
     N: tl.constexpr,
     BLOCK_STATE: tl.constexpr,
     M: tl.constexpr,
+    MAX_K: tl.constexpr,
 ):
     stream_id = tl.program_id(0)
     state_base = stream_id * N
@@ -127,9 +153,30 @@ def _mt19937_single_round_kernel(
         out_offsets = stream_id * N + tid
         if OUTPUT_MODE == 1:
             tl.store(out_ptr + out_offsets, _mt19937_uint32_to_uniform(tempered), mask=state_mask)
-        else:
+        elif OUTPUT_MODE == 0:
             tl.store(out_ptr + out_offsets, tempered.to(tl.int32, bitcast=True), mask=state_mask)
+        elif OUTPUT_MODE == 2 or OUTPUT_MODE == 3:
+            transformed = transform_normal_u32(
+                tempered, mean, stddev, OUTPUT_MODE == 3, BLOCK_STATE
+            )
+            tl.store(out_ptr + out_offsets, transformed, mask=state_mask)
+        elif OUTPUT_MODE == 4:
+            transformed = transform_poisson_small_u32(tempered, lambda_val, MAX_K)
+            tl.store(out_ptr + out_offsets, transformed, mask=state_mask)
+        else:
+            transformed = transform_poisson_large_u32(tempered, lambda_val, BLOCK_STATE)
+            tl.store(out_ptr + out_offsets, transformed, mask=state_mask)
     tl.store(state_ptr + state_base + tid, new_state.to(tl.int32, bitcast=True), mask=state_mask)
+
+
+_MT19937_BLOCKS_LAUNCHER = CachedKernelLauncher(
+    _mt19937_blocks_kernel,
+    constexpr_names=("NUM_ROUNDS", "OUTPUT_MODE", "N", "BLOCK_STATE", "M", "MAX_K"),
+)
+_MT19937_SINGLE_ROUND_LAUNCHER = CachedKernelLauncher(
+    _mt19937_single_round_kernel,
+    constexpr_names=("OUTPUT_MODE", "WRITE_OUTPUT", "N", "BLOCK_STATE", "M", "MAX_K"),
+)
 
 
 def launch_mt19937_blocks(
@@ -140,35 +187,33 @@ def launch_mt19937_blocks(
     output_elements: int,
     rounds: int,
     block_count: int,
-    output_mode: int,
+    output: StatefulOutput,
     requested_num_warps: int,
 ) -> None:
     grid = (block_count,)
     if rounds == 1:
-        _mt19937_single_round_kernel[grid](
-            out,
-            state,
-            output_mode,
-            output_elements > 0,
-            N=MT19937_N,
-            BLOCK_STATE=1024,
-            M=MT19937_M,
-            num_warps=mt19937_launch_warps(block_count, requested_num_warps),
+        _MT19937_SINGLE_ROUND_LAUNCHER.launch(
+            grid,
+            (out, state, output.mean, output.stddev, output.lambda_val),
+            (output.mode, output_elements > 0, MT19937_N, 1024, MT19937_M, output.max_k),
+            (mt19937_launch_warps(block_count, requested_num_warps),),
         )
         return
 
-    _mt19937_blocks_kernel[grid](
-        out,
-        state,
-        scratch,
-        int(output_elements),
-        int(rounds),
-        block_count,
-        output_mode,
-        N=MT19937_N,
-        BLOCK_STATE=1024,
-        M=MT19937_M,
-        num_warps=mt19937_launch_warps(block_count, requested_num_warps),
+    _MT19937_BLOCKS_LAUNCHER.launch(
+        grid,
+        (
+            out,
+            state,
+            scratch,
+            int(output_elements),
+            block_count,
+            output.mean,
+            output.stddev,
+            output.lambda_val,
+        ),
+        (int(rounds), output.mode, MT19937_N, 1024, MT19937_M, output.max_k),
+        (mt19937_launch_warps(block_count, requested_num_warps),),
     )
 
 

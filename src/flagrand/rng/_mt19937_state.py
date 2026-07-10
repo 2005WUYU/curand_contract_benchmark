@@ -11,6 +11,7 @@ from flagrand.rng._mt19937_data import (
 )
 from flagrand.rng._mt19937_kernel import launch_mt19937_blocks
 from flagrand.rng._sequence import clear_chunk_cache
+from flagrand.rng._stateful_output import RAW_OUTPUT, StatefulOutput
 
 
 def ensure_working_state(generator, seed_val: int, device_str: str) -> None:
@@ -23,6 +24,11 @@ def ensure_working_state(generator, seed_val: int, device_str: str) -> None:
     initial_state = build_initial_states(seed_val).to(torch.device(device_str))
     generator._working_state = initial_state
     generator._scratch = torch.empty_like(initial_state)
+    generator._mt19937_prefix_raw = torch.empty(MT19937_N, device=device_str, dtype=torch.int32)
+    generator._mt19937_next_raw = torch.empty_like(generator._mt19937_prefix_raw)
+    generator._mt19937_prefix_start = 0
+    generator._mt19937_prefix_offset = 0
+    generator._mt19937_prefix_count = 0
     generator._ws_seed = seed_val
     generator._ws_device = device_str
     generator._ws_blocks = initial_state.shape[0]
@@ -52,7 +58,7 @@ def advance_to_block_start(generator, block_start_element: int, device_str: str,
                 block_count=MT19937_NUM_STREAMS,
                 rounds=launch_chunks,
                 n_elements=0,
-                output_mode=0,
+                output=RAW_OUTPUT,
             )
             skipped = launch_chunks * MT19937_NUM_STREAMS
         else:
@@ -66,7 +72,7 @@ def advance_to_block_start(generator, block_start_element: int, device_str: str,
                 block_count=block_count,
                 rounds=1,
                 n_elements=0,
-                output_mode=0,
+                output=RAW_OUTPUT,
             )
             skipped = block_count
         blocks_to_skip -= skipped
@@ -83,7 +89,7 @@ def generate_blocks_into(
     block_count: int,
     rounds: int,
     n_elements: int | None = None,
-    output_mode: int = 0,
+    output: StatefulOutput = RAW_OUTPUT,
 ) -> None:
     if rounds <= 0 or block_count <= 0:
         return
@@ -101,7 +107,7 @@ def generate_blocks_into(
         output_elements=output_elements,
         rounds=rounds,
         block_count=block_count,
-        output_mode=output_mode,
+        output=output,
         requested_num_warps=num_warps,
     )
     generator._ws_next_block_start = (

@@ -10,6 +10,7 @@ from flagrand.rng._mt19937_data import (
 )
 from flagrand.rng._mt19937_state import advance_to_block_start, generate_blocks_into
 from flagrand.rng._sequence import clear_chunk_cache
+from flagrand.rng._stateful_output import StatefulOutput
 
 
 def copy_from_cache(
@@ -47,7 +48,7 @@ def cache_one_block(
     cache_key: tuple[object, ...],
     device_str: str,
     num_warps: int,
-    output_mode: int,
+    output: StatefulOutput,
 ) -> None:
     block_start_element = (current // MT19937_N) * MT19937_N
     advance_to_block_start(generator, block_start_element, device_str, num_warps)
@@ -61,7 +62,7 @@ def cache_one_block(
         block_start=block_start,
         block_count=1,
         rounds=1,
-        output_mode=output_mode,
+        output=output,
     )
     setattr(generator, "_chunk_cache", cache)
     setattr(generator, "_chunk_cache_start", block_start_element)
@@ -76,7 +77,7 @@ def prefetch_blocks(
     cache_key: tuple[object, ...],
     device_str: str,
     num_warps: int,
-    output_mode: int,
+    output: StatefulOutput,
     *,
     multi_round: bool,
 ) -> None:
@@ -93,7 +94,7 @@ def prefetch_blocks(
         block_start=block_start,
         block_count=block_count,
         rounds=rounds,
-        output_mode=output_mode,
+        output=output,
     )
     setattr(generator, "_chunk_cache", cache)
     setattr(generator, "_chunk_cache_start", current)

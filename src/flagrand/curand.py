@@ -17,6 +17,13 @@ from flagrand._curand_quasi_fast_path import (
     try_generate_quasi_raw,
     try_generate_quasi_uniform,
 )
+from flagrand._curand_stateful_fast_path import (
+    try_generate_stateful_lognormal,
+    try_generate_stateful_normal,
+    try_generate_stateful_poisson,
+    try_generate_stateful_raw,
+    try_generate_stateful_uniform,
+)
 from flagrand._curand_handle import (
     CURAND_RNG_PSEUDO_MRG32K3A,
     CURAND_RNG_PSEUDO_MT19937,
@@ -46,7 +53,11 @@ def generate(
     **kwargs: object,
 ) -> torch.Tensor:
     _require_dtype(out, torch.int32, "generate")
-    if try_generate_raw(generator, out, kwargs) or try_generate_quasi_raw(generator, out, kwargs):
+    if (
+        try_generate_stateful_raw(generator, out, kwargs)
+        or try_generate_raw(generator, out, kwargs)
+        or try_generate_quasi_raw(generator, out, kwargs)
+    ):
         return out
     return _generate_raw(out, _engine(generator), **kwargs)
 
@@ -68,7 +79,11 @@ def generate_uniform(
     **kwargs: object,
 ) -> torch.Tensor:
     _require_dtype(out, torch.float32, "generate_uniform")
-    if try_generate_uniform(generator, out, kwargs) or try_generate_quasi_uniform(generator, out, kwargs):
+    if (
+        try_generate_stateful_uniform(generator, out, kwargs)
+        or try_generate_uniform(generator, out, kwargs)
+        or try_generate_quasi_uniform(generator, out, kwargs)
+    ):
         return out
     return _generate_uniform(out, _engine(generator), **kwargs)
 
@@ -93,7 +108,9 @@ def generate_normal(
     **kwargs: object,
 ) -> torch.Tensor:
     _require_dtype(out, torch.float32, "generate_normal")
-    if try_generate_normal(
+    if try_generate_stateful_normal(
+        generator, out, mean=mean, stddev=stddev, kwargs=kwargs
+    ) or try_generate_normal(
         generator, out, mean=mean, stddev=stddev, kwargs=kwargs
     ) or try_generate_quasi_normal(
         generator, out, mean=mean, stddev=stddev, kwargs=kwargs
@@ -129,7 +146,9 @@ def generate_lognormal(
     **kwargs: object,
 ) -> torch.Tensor:
     _require_dtype(out, torch.float32, "generate_lognormal")
-    if try_generate_lognormal(
+    if try_generate_stateful_lognormal(
+        generator, out, mean=mean, stddev=stddev, kwargs=kwargs
+    ) or try_generate_lognormal(
         generator, out, mean=mean, stddev=stddev, kwargs=kwargs
     ) or try_generate_quasi_lognormal(
         generator, out, mean=mean, stddev=stddev, kwargs=kwargs
@@ -164,7 +183,11 @@ def generate_poisson(
     **kwargs: object,
 ) -> torch.Tensor:
     _require_dtype(out, torch.int32, "generate_poisson")
-    if try_generate_poisson(generator, out, lambda_val=lambda_val, kwargs=kwargs):
+    if try_generate_stateful_poisson(
+        generator, out, lambda_val=lambda_val, kwargs=kwargs
+    ) or try_generate_poisson(
+        generator, out, lambda_val=lambda_val, kwargs=kwargs
+    ):
         return out
     return _generate_poisson(out, _engine(generator), lambda_val=lambda_val, **kwargs)
 

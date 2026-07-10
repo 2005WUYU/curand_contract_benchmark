@@ -17,6 +17,8 @@ from flagrand.fused._internal.utils import (
     GENERATOR_PHILOX,
     GENERATOR_XORWOW,
     GENERATOR_MRG32K3A,
+    GENERATOR_MT19937,
+    GENERATOR_MTGP32,
     GENERATOR_SOBOL32,
     GENERATOR_SOBOL64,
     GENERATOR_SCRAMBLED_SOBOL32,
@@ -32,6 +34,7 @@ _QUASI_GENERATORS = {
     GENERATOR_SCRAMBLED_SOBOL32,
     GENERATOR_SCRAMBLED_SOBOL64,
 }
+_FUSED_STATE_GENERATORS = {GENERATOR_MT19937, GENERATOR_MTGP32}
 
 
 @triton.jit
@@ -140,6 +143,9 @@ def generate_lognormal(
         return out
     if n % 2 != 0:
         raise ValueError(f"generate_lognormal: Box-Muller output requires an even element count, got {n}.")
+    if gen_type in _FUSED_STATE_GENERATORS:
+        generator.generate_lognormal(out, mean=mean, stddev=stddev, num_warps=num_warps)
+        return out
 
     if is_64:
         raw = _generate_raw64(generator, out.shape, out.device)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any
 
@@ -40,6 +41,7 @@ class CachedKernelLauncher:
         self._option_names = option_names
         self._max_entries = max_entries
         self._entries: list[_LaunchEntry] = []
+        self._keyed_entries: OrderedDict[object, _LaunchEntry] = OrderedDict()
 
     def launch(
         self,
@@ -47,10 +49,17 @@ class CachedKernelLauncher:
         args: tuple[object, ...],
         constexpr_values: tuple[object, ...],
         option_values: tuple[object, ...],
+        *,
+        specialization_key: object | None = None,
     ) -> Any:
         grid3 = _normalize_grid(grid)
         values = args + constexpr_values
         if not _requires_regular_jit(self._kernel):
+            if specialization_key is not None:
+                entry = self._keyed_entries.get(specialization_key)
+                if entry is not None:
+                    self._keyed_entries.move_to_end(specialization_key)
+                    return _launch_entry(entry, grid3, values)
             entry = find_matching_entry(
                 self._entries,
                 values,
@@ -58,6 +67,7 @@ class CachedKernelLauncher:
                 option_values,
             )
             if entry is not None:
+                self._remember_key(specialization_key, entry)
                 return _launch_entry(entry, grid3, values)
         return self._compile_and_launch(
             grid3,
@@ -65,6 +75,7 @@ class CachedKernelLauncher:
             values,
             constexpr_values,
             option_values,
+            specialization_key,
         )
 
     def _compile_and_launch(
@@ -74,6 +85,7 @@ class CachedKernelLauncher:
         values: tuple[object, ...],
         constexpr_values: tuple[object, ...],
         option_values: tuple[object, ...],
+        specialization_key: object | None,
     ) -> Any:
         if len(constexpr_values) != len(self._constexpr_names):
             raise ValueError("constexpr value count does not match launcher configuration")
@@ -107,7 +119,16 @@ class CachedKernelLauncher:
         )
         self._entries.insert(0, entry)
         del self._entries[self._max_entries :]
+        self._remember_key(specialization_key, entry)
         return compiled
+
+    def _remember_key(self, key: object | None, entry: _LaunchEntry) -> None:
+        if key is None:
+            return
+        self._keyed_entries[key] = entry
+        self._keyed_entries.move_to_end(key)
+        while len(self._keyed_entries) > self._max_entries:
+            self._keyed_entries.popitem(last=False)
 
 
 def _launch_entry(

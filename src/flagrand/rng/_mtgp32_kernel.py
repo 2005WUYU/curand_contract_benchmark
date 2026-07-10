@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 import torch
 import triton
 import triton.language as tl
@@ -10,6 +12,14 @@ from flagrand.rng._mtgp32_data import (
     MTGP32_STATE_MASK,
     MTGPDC_N,
 )
+from flagrand.rng._stateful_output import (
+    StatefulOutput,
+    transform_normal_u32,
+    transform_poisson_large_u32,
+    transform_poisson_table_u32,
+)
+from flagrand.fused._internal.philox_poisson_table import _cdf_table
+from flagrand.runtime import CachedKernelLauncher
 
 
 @triton.jit
@@ -42,6 +52,11 @@ def _mtgp32_kernel(
     param_ptr,
     temper_ptr,
     n_elements,
+    mean,
+    stddev,
+    lambda_val,
+    poisson_cdf_ptr,
+    poisson_table_size,
     NUM_ITERS: tl.constexpr,
     START_ITER: tl.constexpr,
     N_BLOCKS: tl.constexpr,
@@ -50,6 +65,8 @@ def _mtgp32_kernel(
     STATE_MASK: tl.constexpr,
     MASK: tl.constexpr,
     N_RECUR: tl.constexpr,
+    MAX_K: tl.constexpr,
+    POISSON_STEPS: tl.constexpr,
 ):
     pid = tl.program_id(0)
     pos = tl.load(pos_ptr + pid)
@@ -82,11 +99,39 @@ def _mtgp32_kernel(
         out_mask = out_idx < n_elements
         if OUTPUT_MODE == 1:
             tl.store(out_ptr + out_idx, _mtgp32_uint32_to_uniform(o), mask=out_mask)
-        else:
+        elif OUTPUT_MODE == 0:
             tl.store(out_ptr + out_idx, o.to(tl.int32, bitcast=True), mask=out_mask)
+        elif OUTPUT_MODE == 2 or OUTPUT_MODE == 3:
+            transformed = transform_normal_u32(o, mean, stddev, OUTPUT_MODE == 3, BLOCK_SIZE)
+            tl.store(out_ptr + out_idx, transformed, mask=out_mask)
+        elif OUTPUT_MODE == 4:
+            transformed = transform_poisson_table_u32(
+                o, poisson_cdf_ptr, poisson_table_size, POISSON_STEPS
+            )
+            tl.store(out_ptr + out_idx, transformed, mask=out_mask)
+        else:
+            transformed = transform_poisson_large_u32(o, lambda_val, BLOCK_SIZE)
+            tl.store(out_ptr + out_idx, transformed, mask=out_mask)
 
         if k + 1 < NUM_ITERS:
             tl.debug_barrier()
+
+
+_MTGP32_LAUNCHER = CachedKernelLauncher(
+    _mtgp32_kernel,
+    constexpr_names=(
+        "NUM_ITERS",
+        "START_ITER",
+        "N_BLOCKS",
+        "OUTPUT_MODE",
+        "BLOCK_SIZE",
+        "STATE_MASK",
+        "MASK",
+        "N_RECUR",
+        "MAX_K",
+        "POISSON_STEPS",
+    ),
+)
 
 
 def launch_mtgp32_blocks(
@@ -102,28 +147,42 @@ def launch_mtgp32_blocks(
     chunks: int,
     start_iter: int,
     block_count: int,
-    output_mode: int,
+    output: StatefulOutput,
     requested_num_warps: int,
 ) -> None:
     grid = (block_count,)
-    _mtgp32_kernel[grid](
-        out,
-        state,
-        pos,
-        sh1,
-        sh2,
-        param,
-        temper,
-        output_elements,
-        int(chunks),
-        start_iter,
-        block_count,
-        output_mode,
-        BLOCK_SIZE=MTGP32_BLOCK_SIZE,
-        STATE_MASK=MTGP32_STATE_MASK,
-        MASK=MTGP32_MASK,
-        N_RECUR=MTGPDC_N,
-        num_warps=mtgp32_launch_warps(block_count, chunks, requested_num_warps),
+    poisson_table = _cdf_table(output.lambda_val, str(out.device)) if output.mode == 4 else state
+    poisson_steps = math.ceil(math.log2(poisson_table.numel())) if output.mode == 4 else 0
+    _MTGP32_LAUNCHER.launch(
+        grid,
+        (
+            out,
+            state,
+            pos,
+            sh1,
+            sh2,
+            param,
+            temper,
+            output_elements,
+            output.mean,
+            output.stddev,
+            output.lambda_val,
+            poisson_table,
+            poisson_table.numel(),
+        ),
+        (
+            int(chunks),
+            start_iter,
+            block_count,
+            output.mode,
+            MTGP32_BLOCK_SIZE,
+            MTGP32_STATE_MASK,
+            MTGP32_MASK,
+            MTGPDC_N,
+            output.max_k,
+            poisson_steps,
+        ),
+        (mtgp32_launch_warps(block_count, chunks, requested_num_warps),),
     )
 
 
