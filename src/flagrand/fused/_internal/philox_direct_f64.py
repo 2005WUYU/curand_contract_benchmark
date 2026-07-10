@@ -7,7 +7,7 @@ import triton.language as tl
 from flagrand.runtime import CachedKernelLauncher
 from flagrand.fused._internal.transforms import (
     uint32_pair_to_uniform64_curand_compat,
-    uniform_to_normal_trig_f64,
+    uniform_to_normal_fast_f64,
 )
 
 
@@ -58,7 +58,7 @@ def _philox_normal_f64_kernel(
     r0, r1, r2, r3 = _philox_generate(seed, base_counter + offs)
     u0 = uint32_pair_to_uniform64_curand_compat(r0, r1)
     u1 = uint32_pair_to_uniform64_curand_compat(r2, r3)
-    n0, n1 = uniform_to_normal_trig_f64(u0, u1)
+    n0, n1 = uniform_to_normal_fast_f64(u0, u1)
 
     if STANDARD:
         y0 = n0

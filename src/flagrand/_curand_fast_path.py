@@ -54,6 +54,7 @@ _DIRECT_TYPES = {
     CURAND_RNG_PSEUDO_XORWOW,
     CURAND_RNG_PSEUDO_MRG32K3A,
 }
+_PHILOX_F64_NORMAL_CONFIG = (128, 4)
 
 
 def try_generate_raw(generator, out: torch.Tensor, kwargs: dict[str, object]) -> bool:
@@ -107,6 +108,12 @@ def try_generate_normal(
     if prepared is None:
         return False
     rng_type, engine, block_size, num_warps = prepared
+    if (
+        not kwargs
+        and rng_type == CURAND_RNG_PSEUDO_PHILOX4_32_10
+        and out.dtype == torch.float64
+    ):
+        block_size, num_warps = _PHILOX_F64_NORMAL_CONFIG
     if out.numel() == 0:
         return True
     if rng_type == CURAND_RNG_PSEUDO_PHILOX4_32_10:
@@ -132,6 +139,12 @@ def try_generate_lognormal(
     if prepared is None:
         return False
     rng_type, engine, block_size, num_warps = prepared
+    if (
+        not kwargs
+        and rng_type == CURAND_RNG_PSEUDO_PHILOX4_32_10
+        and out.dtype == torch.float64
+    ):
+        block_size, num_warps = _PHILOX_F64_NORMAL_CONFIG
     if out.numel() == 0:
         return True
     if rng_type == CURAND_RNG_PSEUDO_PHILOX4_32_10:
@@ -190,6 +203,13 @@ def _prepare(generator, out, kwargs):
     if config is None or not _supports_direct_output(out):
         return None
     return direct[0], direct[1], config[0], config[1]
+
+
+def is_philox_generator(generator) -> bool:
+    return (
+        isinstance(generator, CurandGenerator)
+        and generator.rng_type == CURAND_RNG_PSEUDO_PHILOX4_32_10
+    )
 
 
 def _direct_engine(generator) -> tuple[str, object] | None:

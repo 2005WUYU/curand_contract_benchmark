@@ -38,7 +38,7 @@ def generate_mtgp32_contiguous(
     if (
         offset_val % MTGP32_BLOCK_SIZE == 0
         and flat.numel() % MTGP32_BLOCK_SIZE == 0
-        and flat.numel() >= MTGP32_SEQUENCE_CHUNK
+        and flat.numel() > 0
     ):
         generate_aligned_mtgp32(
             generator,

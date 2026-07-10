@@ -69,6 +69,7 @@ def _mt19937_stream_kernel(
         mask=state_mask & stream_active,
         other=0,
     ).to(tl.uint32, bitcast=True)
+    tl.debug_barrier()
     y = (state & upper_mask) | (state_next & lower_mask)
     magnitude = tl.where((y & one_u32) != zero_u32, matrix_a, zero_u32)
     new_state = state_m ^ (y >> 1) ^ magnitude

@@ -19,6 +19,7 @@ from flagrand.rng._mtgp32_kernel import (
     _mtgp32_temper,
     _mtgp32_uint32_to_uniform,
 )
+from flagrand.rng._mtgp32_range_kernel import generate_range_mtgp32
 from flagrand.rng._stateful_output import (
     StatefulOutput,
     transform_normal_u32,
@@ -152,6 +153,15 @@ def generate_aligned_mtgp32(
     output: StatefulOutput,
 ) -> None:
     num_blocks = out.numel() // MTGP32_BLOCK_SIZE
+    if num_blocks <= MTGP32_MAX_BLOCKS:
+        generate_range_mtgp32(
+            generator,
+            out,
+            block_offset=block_offset,
+            num_warps=num_warps,
+            output=output,
+        )
+        return
     start_stream = block_offset % MTGP32_MAX_BLOCKS
     base_iter = (block_offset // MTGP32_MAX_BLOCKS) % 4
     num_iters = (num_blocks + MTGP32_MAX_BLOCKS - 1) // MTGP32_MAX_BLOCKS
