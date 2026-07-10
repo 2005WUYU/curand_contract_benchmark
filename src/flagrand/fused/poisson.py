@@ -16,6 +16,8 @@ from flagrand.fused._internal.utils import (
     GENERATOR_PHILOX,
     GENERATOR_XORWOW,
     GENERATOR_MRG32K3A,
+    GENERATOR_MT19937,
+    GENERATOR_MTGP32,
     GENERATOR_SOBOL64,
     GENERATOR_SCRAMBLED_SOBOL64,
     _generate_raw,
@@ -147,6 +149,9 @@ def generate_poisson(
     if not is_64 and gen_type == GENERATOR_MRG32K3A:
         max_k = _small_poisson_max_k(lambda_val) if lambda_val < 30.0 else 0
         generate_mrg32k3a_poisson_u32(out, generator, lambda_val=lambda_val, max_k=max_k)
+        return out
+    if gen_type in {GENERATOR_MT19937, GENERATOR_MTGP32}:
+        generator.generate_poisson(out, lambda_val=lambda_val, num_warps=num_warps)
         return out
 
     if is_64:
