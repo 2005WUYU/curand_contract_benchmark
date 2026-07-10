@@ -11,6 +11,12 @@ from flagrand._curand_fast_path import (
     try_generate_raw,
     try_generate_uniform,
 )
+from flagrand._curand_quasi_fast_path import (
+    try_generate_quasi_lognormal,
+    try_generate_quasi_normal,
+    try_generate_quasi_raw,
+    try_generate_quasi_uniform,
+)
 from flagrand._curand_handle import (
     CURAND_RNG_PSEUDO_MRG32K3A,
     CURAND_RNG_PSEUDO_MT19937,
@@ -40,7 +46,7 @@ def generate(
     **kwargs: object,
 ) -> torch.Tensor:
     _require_dtype(out, torch.int32, "generate")
-    if try_generate_raw(generator, out, kwargs):
+    if try_generate_raw(generator, out, kwargs) or try_generate_quasi_raw(generator, out, kwargs):
         return out
     return _generate_raw(out, _engine(generator), **kwargs)
 
@@ -51,6 +57,8 @@ def generate_long_long(
     **kwargs: object,
 ) -> torch.Tensor:
     _require_dtype(out, torch.int64, "generate_long_long")
+    if try_generate_raw(generator, out, kwargs) or try_generate_quasi_raw(generator, out, kwargs):
+        return out
     return _generate_raw(out, _engine(generator), **kwargs)
 
 
@@ -60,7 +68,7 @@ def generate_uniform(
     **kwargs: object,
 ) -> torch.Tensor:
     _require_dtype(out, torch.float32, "generate_uniform")
-    if try_generate_uniform(generator, out, kwargs):
+    if try_generate_uniform(generator, out, kwargs) or try_generate_quasi_uniform(generator, out, kwargs):
         return out
     return _generate_uniform(out, _engine(generator), **kwargs)
 
@@ -71,7 +79,7 @@ def generate_uniform_double(
     **kwargs: object,
 ) -> torch.Tensor:
     _require_dtype(out, torch.float64, "generate_uniform_double")
-    if try_generate_uniform(generator, out, kwargs):
+    if try_generate_uniform(generator, out, kwargs) or try_generate_quasi_uniform(generator, out, kwargs):
         return out
     return _generate_uniform(out, _engine(generator), **kwargs)
 
@@ -85,7 +93,11 @@ def generate_normal(
     **kwargs: object,
 ) -> torch.Tensor:
     _require_dtype(out, torch.float32, "generate_normal")
-    if try_generate_normal(generator, out, mean=mean, stddev=stddev, kwargs=kwargs):
+    if try_generate_normal(
+        generator, out, mean=mean, stddev=stddev, kwargs=kwargs
+    ) or try_generate_quasi_normal(
+        generator, out, mean=mean, stddev=stddev, kwargs=kwargs
+    ):
         return out
     return _generate_normal(out, _engine(generator), mean=mean, stddev=stddev, **kwargs)
 
@@ -99,7 +111,11 @@ def generate_normal_double(
     **kwargs: object,
 ) -> torch.Tensor:
     _require_dtype(out, torch.float64, "generate_normal_double")
-    if try_generate_normal(generator, out, mean=mean, stddev=stddev, kwargs=kwargs):
+    if try_generate_normal(
+        generator, out, mean=mean, stddev=stddev, kwargs=kwargs
+    ) or try_generate_quasi_normal(
+        generator, out, mean=mean, stddev=stddev, kwargs=kwargs
+    ):
         return out
     return _generate_normal(out, _engine(generator), mean=mean, stddev=stddev, **kwargs)
 
@@ -113,7 +129,11 @@ def generate_lognormal(
     **kwargs: object,
 ) -> torch.Tensor:
     _require_dtype(out, torch.float32, "generate_lognormal")
-    if try_generate_lognormal(generator, out, mean=mean, stddev=stddev, kwargs=kwargs):
+    if try_generate_lognormal(
+        generator, out, mean=mean, stddev=stddev, kwargs=kwargs
+    ) or try_generate_quasi_lognormal(
+        generator, out, mean=mean, stddev=stddev, kwargs=kwargs
+    ):
         return out
     return _generate_lognormal(out, _engine(generator), mean=mean, stddev=stddev, **kwargs)
 
@@ -127,7 +147,11 @@ def generate_lognormal_double(
     **kwargs: object,
 ) -> torch.Tensor:
     _require_dtype(out, torch.float64, "generate_lognormal_double")
-    if try_generate_lognormal(generator, out, mean=mean, stddev=stddev, kwargs=kwargs):
+    if try_generate_lognormal(
+        generator, out, mean=mean, stddev=stddev, kwargs=kwargs
+    ) or try_generate_quasi_lognormal(
+        generator, out, mean=mean, stddev=stddev, kwargs=kwargs
+    ):
         return out
     return _generate_lognormal(out, _engine(generator), mean=mean, stddev=stddev, **kwargs)
 
