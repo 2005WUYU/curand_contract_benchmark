@@ -36,7 +36,7 @@ def run_many_small(ctx: BenchmarkContext, spec: TaskSpec, *, calls: int) -> list
 
             else:
                 gen = make_flagrand_generator(generator, seed=ctx.seed, offset=ctx.offset)
-                api_surface = "flagrand_public_api"
+                api_surface = "flagrand.curand"
 
                 def run_once() -> None:
                     for chunk in chunks:

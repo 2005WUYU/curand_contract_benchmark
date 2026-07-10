@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import os
 import platform
 import statistics
@@ -71,6 +72,7 @@ HOSTAPI_PROFILES = {
 DEFAULT_DISTRIBUTIONS = ["raw", "uniform", "normal", "lognormal", "poisson"]
 DEFAULT_GENERATORS = list(GENERATOR_INFOS)
 BENCHMARK_NAME = "hostapi_only"
+MAX_QRNG_DIMENSIONS = 20_000
 RUNTIME_CACHE_ENV: dict[str, str] = {}
 
 
@@ -117,9 +119,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--warmup", type=int, default=_optional_int_env("HOSTAPI_WARMUP"))
     parser.add_argument("--repeats", type=int, default=_optional_int_env("HOSTAPI_REPEATS"))
     parser.add_argument("--seed", type=int, default=int(os.environ.get("HOSTAPI_SEED", "12345")))
-    parser.add_argument("--offset", type=int, default=int(os.environ.get("HOSTAPI_OFFSET", "0")))
+    parser.add_argument(
+        "--offset",
+        type=int,
+        default=int(os.environ.get("HOSTAPI_OFFSET", "0")),
+        help="Non-negative offset; must be comparable for every selected generator and Philox-aligned when applicable.",
+    )
     parser.add_argument("--ordering", default=os.environ.get("HOSTAPI_ORDERING", "legacy"))
-    parser.add_argument("--qrng-dimensions", type=int, default=int(os.environ.get("HOSTAPI_QRNG_DIMENSIONS", "1")))
+    parser.add_argument(
+        "--qrng-dimensions",
+        type=int,
+        default=int(os.environ.get("HOSTAPI_QRNG_DIMENSIONS", "1")),
+        help=f"QRNG dimensions in [1, {MAX_QRNG_DIMENSIONS}]; case sizes are aligned automatically.",
+    )
     parser.add_argument("--results-dir", type=Path, default=Path(os.environ.get("HOSTAPI_RESULTS_DIR", REPO_ROOT / "results" / "hostapi_only")))
     parser.add_argument("--run-dir", type=Path, default=None)
     parser.add_argument("--shard-index", type=int, default=None)
@@ -153,7 +165,29 @@ def main() -> int:
 
 
 def build_cases(args: argparse.Namespace, profile: HostApiProfile) -> list[HostApiCase]:
+    if not 1 <= args.qrng_dimensions <= MAX_QRNG_DIMENSIONS:
+        raise SystemExit(
+            f"--qrng-dimensions must be between 1 and {MAX_QRNG_DIMENSIONS}, "
+            f"got {args.qrng_dimensions}."
+        )
+    if args.offset < 0:
+        raise SystemExit(f"--offset must be >= 0, got {args.offset}.")
     generators = _selected_generators(args.generators)
+    offset_incompatible = [
+        generator
+        for generator in generators
+        if args.offset != 0 and not GENERATOR_INFOS[generator].supports_offset
+    ]
+    if offset_incompatible:
+        raise SystemExit(
+            "A non-zero --offset is not comparable for selected generator(s): "
+            f"{offset_incompatible}. Use --offset 0 or select generators with supports_offset=True."
+        )
+    if args.offset % 4 and "philox4x32_10" in generators:
+        raise SystemExit(
+            "Philox --offset is measured in uint32 outputs and must be a multiple of 4, "
+            f"got {args.offset}."
+        )
     requested_distributions = _selected_distributions(args.distributions)
     sizes = _selected_ints(args.sizes, profile.sizes)
     poisson_lambdas = _selected_floats(args.poisson_lambdas, profile.poisson_lambdas)
@@ -175,7 +209,13 @@ def build_cases(args: argparse.Namespace, profile: HostApiProfile) -> list[HostA
                         parameters["lambda"] = float(lambda_val)
                         if float(lambda_val) >= 30.0:
                             notes.append("FlagRand large-lambda Poisson uses the repository approximation path.")
-                    n = _adjust_n(int(n0), generator, distribution, parameters)
+                    n = _adjust_n(
+                        int(n0),
+                        generator,
+                        distribution,
+                        parameters,
+                        dimensions=dimensions,
+                    )
                     dtype_name = _dtype_name_for_distribution(distribution)
                     case_id = _case_id(generator, distribution, n, parameters, dimensions)
                     cases.append(
@@ -289,7 +329,7 @@ def run_parallel(
     manifest["record_count"] = len(records)
     _write_outputs(root_dir, records, cases, environment, summary, manifest)
     _print_summary("[hostapi-only]", root_dir, summary)
-    return 1 if failures else 0
+    return 0 if summary.get("run_health", {}).get("status") == "ok" else 1
 
 
 def run_single(
@@ -334,7 +374,7 @@ def run_single(
     }
     _write_outputs(run_dir, records, cases, environment, summary, manifest)
     _print_summary("[hostapi-only]", run_dir, summary)
-    return 0
+    return 0 if summary.get("run_health", {}).get("status") == "ok" else 1
 
 
 def run_case(case: HostApiCase, *, args: argparse.Namespace, profile: HostApiProfile) -> list[dict[str, Any]]:
@@ -385,13 +425,13 @@ def run_backend(
             repeats=_repeats(args, profile),
         )
         return _timed_record(case, backend, timing, validation, args=args)
-    except BaseException as exc:
+    except Exception as exc:
         return _exception_record(case, backend, exc, args=args)
     finally:
         if backend == "curand_host_api" and gen is not None:
             try:
                 gen.destroy()
-            except BaseException:
+            except Exception:
                 pass
 
 
@@ -410,7 +450,7 @@ def _validate_after_run(run_once: Any, out: torch.Tensor, case: HostApiCase) -> 
         if case.distribution == "poisson_u32":
             return validate_poisson(out, n=case.n, lambda_val=float(case.parameters["lambda"]))
         return {"status": "pass", "checks": {"shape_numel": out.numel() == case.n}}
-    except BaseException as exc:
+    except Exception as exc:
         return {"status": "fail", "error_type": type(exc).__name__, "error": str(exc)}
 
 
@@ -457,6 +497,8 @@ def _exception_record(
     args: argparse.Namespace,
 ) -> dict[str, Any]:
     execution = _execution_metadata(case, backend)
+    status = "unsupported" if isinstance(exc, NotImplementedError) else "error"
+    error_key = "unsupported_reason" if status == "unsupported" else "error"
     return {
         **case.to_record(),
         "benchmark": BENCHMARK_NAME,
@@ -465,10 +507,10 @@ def _exception_record(
         "ordering": args.ordering if GENERATOR_INFOS[case.generator].kind == "prng" else None,
         "seed": args.seed if GENERATOR_INFOS[case.generator].supports_seed else None,
         "offset": args.offset,
-        "status": "unsupported",
+        "status": status,
         "validation": {
-            "status": "unsupported",
-            "unsupported_reason": str(exc),
+            "status": status,
+            error_key: str(exc),
             "error_type": type(exc).__name__,
         },
         "output_bytes": case.n * torch.empty((), dtype=case.torch_dtype).element_size(),
@@ -505,6 +547,7 @@ def summarize_records(
         for record in paired
         if record.get("backend") == "flagrand_public_api" and record.get("speedup_gpu_vs_curand_host") is not None
     ]
+    non_ok_record_count = sum(count for status, count in status_counts.items() if status != "ok")
     return {
         "benchmark": BENCHMARK_NAME,
         "profile": environment.get("profile"),
@@ -516,8 +559,10 @@ def summarize_records(
         "speedup_gpu_vs_curand_host": _sample_summary(speedups),
         "failures": failures,
         "run_health": {
-            "status": "ok" if not failures else "needs_attention",
+            "status": "ok" if not failures and non_ok_record_count == 0 else "needs_attention",
             "shard_process_failure_count": len(failures),
+            "non_ok_record_count": non_ok_record_count,
+            "error_record_count": status_counts.get("error", 0),
             "unsupported_record_count": status_counts.get("unsupported", 0),
             "validation_fail_record_count": status_counts.get("validation_fail", 0),
         },
@@ -593,6 +638,12 @@ def collect_host_environment(
         env["curand"] = library_load_report()
     except BaseException as exc:
         env["curand"] = {"available": False, "error": str(exc), "error_type": type(exc).__name__}
+    try:
+        from contract_benchmark.flagrand_provenance import flagrand_source_report
+
+        env["flagrand"] = flagrand_source_report(verify_tree=True)
+    except BaseException as exc:
+        env["flagrand"] = {"available": False, "error": str(exc), "error_type": type(exc).__name__}
     if extra:
         env.update(extra)
     return env
@@ -633,7 +684,7 @@ def _write_report(path: Path, records: list[dict[str, Any]], summary: dict[str, 
     lines = [
         "# Host API Only Benchmark Report",
         "",
-        "This benchmark compares only two surfaces: cuRAND Host API as the baseline and FlagRand public API as the candidate.",
+        "This benchmark compares only two surfaces: cuRAND Host API as the baseline and the refactored FlagRand `flagrand.curand` facade as the candidate.",
         "It does not run the contract task registry, Device API extension, cuRANDDx extension, fused-consume baselines, or gate logic.",
         "",
         "## Environment",
@@ -643,6 +694,9 @@ def _write_report(path: Path, records: list[dict[str, Any]], summary: dict[str, 
         f"- cuda available: `{environment.get('cuda_available')}`",
         f"- gpu: `{environment.get('gpu_name')}`",
         f"- cuRAND version: `{environment.get('curand', {}).get('version')}`",
+        f"- FlagRand source commit: `{environment.get('flagrand', {}).get('vendor', {}).get('commit')}`",
+        f"- FlagRand module: `{environment.get('flagrand', {}).get('module_file')}`",
+        f"- FlagRand source verified: `{environment.get('flagrand', {}).get('tree_matches_manifest')}`",
         f"- git commit: `{environment.get('git', {}).get('commit')}`",
         "",
         "## Summary",
@@ -662,10 +716,10 @@ def _write_report(path: Path, records: list[dict[str, Any]], summary: dict[str, 
     lines.extend(_markdown_table(worst_rows, limit=20))
     lines.extend(["", "## Fastest FlagRand Relative Cases", ""])
     lines.extend(_markdown_table(best_rows, limit=20))
-    unsupported = [record for record in records if record.get("status") == "unsupported"]
-    if unsupported:
-        lines.extend(["", "## Unsupported Records", ""])
-        lines.extend(_unsupported_table(unsupported, limit=40))
+    non_ok = [record for record in records if record.get("status") != "ok"]
+    if non_ok:
+        lines.extend(["", "## Non-OK Records", ""])
+        lines.extend(_non_ok_table(non_ok, limit=40))
     lines.extend(
         [
             "",
@@ -673,6 +727,8 @@ def _write_report(path: Path, records: list[dict[str, Any]], summary: dict[str, 
             "",
             "- `speedup_gpu_vs_curand_host > 1` means FlagRand was faster than cuRAND Host API by CUDA-event median.",
             "- `path_kind`, `kernel_launch_count_estimate`, and `temporary_bytes` are recorded per row to distinguish direct public paths from raw-plus-transform paths.",
+            "- Dynamic stateful MT19937/MTGP32 launch counts are recorded as `null` rather than reported with a misleading fixed estimate.",
+            "- Benchmark-local fused consumer kernels belong to the full task benchmark and are not part of this host-API-only comparison.",
             "- Large-lambda FlagRand Poisson rows use the repository approximation path and are marked with `semantic_mode=approximation`.",
             "- Full per-repeat timing samples are in `records.jsonl`; compact analysis rows are in `records.csv`.",
         ]
@@ -707,19 +763,19 @@ def _markdown_table(records: list[dict[str, Any]], *, limit: int) -> list[str]:
     return lines
 
 
-def _unsupported_table(records: list[dict[str, Any]], *, limit: int) -> list[str]:
+def _non_ok_table(records: list[dict[str, Any]], *, limit: int) -> list[str]:
     lines = [
-        "| backend | generator | distribution | N | reason |",
-        "|---|---|---:|---:|---|",
+        "| status | backend | generator | distribution | N | reason |",
+        "|---|---|---|---:|---:|---|",
     ]
     for record in records[:limit]:
         validation = record.get("validation", {})
         reason = validation.get("unsupported_reason") or validation.get("error") or ""
         lines.append(
-            f"| {record.get('backend')} | {record.get('generator')} | {record.get('distribution')} | {record.get('N')} | `{str(reason)[:160]}` |"
+            f"| {record.get('status')} | {record.get('backend')} | {record.get('generator')} | {record.get('distribution')} | {record.get('N')} | `{str(reason)[:160]}` |"
         )
     if len(records) > limit:
-        lines.append("| ... | ... | ... | ... | ... |")
+        lines.append("| ... | ... | ... | ... | ... | ... |")
     return lines
 
 
@@ -730,6 +786,7 @@ def _write_csv(path: Path, records: list[dict[str, Any]]) -> None:
         "case_id",
         "backend",
         "is_baseline",
+        "api_surface",
         "generator",
         "distribution",
         "N",
@@ -744,6 +801,8 @@ def _write_csv(path: Path, records: list[dict[str, Any]]) -> None:
         "semantic_equivalence",
         "validation_status",
         "unsupported_reason",
+        "error_type",
+        "error",
         "median_gpu_us",
         "median_wall_sync_us",
         "median_cpu_enqueue_us",
@@ -757,6 +816,7 @@ def _write_csv(path: Path, records: list[dict[str, Any]]) -> None:
         "output_bytes",
         "temporary_bytes",
         "generator_state_bytes_estimate",
+        "generator_state_bytes_estimate_kind",
         "notes",
     ]
     with path.open("w", encoding="utf-8", newline="") as f:
@@ -769,6 +829,8 @@ def _write_csv(path: Path, records: list[dict[str, Any]]) -> None:
             row["notes"] = json.dumps(record.get("notes", []), ensure_ascii=False)
             row["validation_status"] = validation.get("status")
             row["unsupported_reason"] = validation.get("unsupported_reason")
+            row["error_type"] = validation.get("error_type")
+            row["error"] = validation.get("error")
             writer.writerow(row)
 
 
@@ -844,11 +906,20 @@ def _expand_distributions(info: GeneratorInfo, requested: list[str]) -> list[str
             if info.supports_raw64:
                 distributions.append("raw64")
         elif item == "uniform":
-            distributions.append("uniform_f64" if info.supports_raw64 else "uniform_f32")
+            if info.supports_distributions_f32:
+                distributions.append("uniform_f32")
+            if info.supports_distributions_f64:
+                distributions.append("uniform_f64")
         elif item == "normal":
-            distributions.append("normal_f64" if info.supports_raw64 else "normal_f32")
+            if info.supports_distributions_f32:
+                distributions.append("normal_f32")
+            if info.supports_distributions_f64:
+                distributions.append("normal_f64")
         elif item == "lognormal":
-            distributions.append("lognormal_f64" if info.supports_raw64 else "lognormal_f32")
+            if info.supports_distributions_f32:
+                distributions.append("lognormal_f32")
+            if info.supports_distributions_f64:
+                distributions.append("lognormal_f64")
         elif item == "poisson":
             if info.kind == "prng" and info.supports_raw32:
                 distributions.append("poisson_u32")
@@ -864,22 +935,36 @@ def _distribution_supported_by_info(info: GeneratorInfo, distribution: str) -> b
     if distribution == "raw64":
         return info.supports_raw64
     if distribution in {"uniform_f32", "normal_f32", "lognormal_f32"}:
-        return info.supports_raw32
+        return info.supports_distributions_f32
     if distribution in {"uniform_f64", "normal_f64", "lognormal_f64"}:
-        return info.supports_raw64
+        return info.supports_distributions_f64
     if distribution == "poisson_u32":
         return info.kind == "prng" and info.supports_raw32
     raise SystemExit(f"Unknown distribution selector: {distribution}")
 
 
-def _adjust_n(n: int, generator: str, distribution: str, parameters: dict[str, Any]) -> int:
+def _adjust_n(
+    n: int,
+    generator: str,
+    distribution: str,
+    parameters: dict[str, Any],
+    *,
+    dimensions: int | None = None,
+) -> int:
     value = max(1, int(n))
+    alignments = [1]
     if generator == "philox4x32_10":
-        value += (-value % 4)
-    if distribution in {"normal_f32", "normal_f64", "lognormal_f32", "lognormal_f64"} and value % 2:
-        value += 1
-    if distribution == "poisson_u32" and float(parameters.get("lambda", 0.0)) >= 30.0 and value % 2:
-        value += 1
+        alignments.append(4)
+    if distribution in {"normal_f32", "normal_f64", "lognormal_f32", "lognormal_f64"}:
+        alignments.append(2)
+    if distribution == "poisson_u32" and float(parameters.get("lambda", 0.0)) >= 30.0:
+        alignments.append(2)
+    if dimensions is not None:
+        if dimensions < 1:
+            raise ValueError(f"QRNG dimensions must be >= 1, got {dimensions}.")
+        alignments.append(int(dimensions))
+    alignment = math.lcm(*alignments)
+    value += -value % alignment
     return value
 
 
@@ -920,27 +1005,34 @@ def _execution_metadata(case: HostApiCase, backend: str) -> dict[str, Any]:
     if backend == "curand_host_api":
         return {
             **semantic,
+            "api_surface": "nvidia.curand.host",
             "path_kind": "curand_host_direct",
             "kernel_launch_count_estimate": 1,
             "temporary_bytes": 0,
-            "generator_state_bytes_estimate": _generator_state_bytes_estimate(case.generator),
+            "generator_state_bytes_estimate": None,
+            "generator_state_bytes_estimate_kind": "opaque_curand_handle",
         }
     if backend != "flagrand_public_api":
         return {
             **semantic,
+            "api_surface": "unknown",
             "path_kind": "unknown",
             "kernel_launch_count_estimate": None,
             "temporary_bytes": 0,
-            "generator_state_bytes_estimate": _generator_state_bytes_estimate(case.generator),
+            "generator_state_bytes_estimate": None,
+            "generator_state_bytes_estimate_kind": "unknown",
         }
 
     path_kind = _flagrand_path_kind(case)
+    state_bytes, state_kind = _flagrand_state_bytes_estimate(case, path_kind)
     return {
         **semantic,
+        "api_surface": "flagrand.curand",
         "path_kind": path_kind,
         "kernel_launch_count_estimate": _flagrand_launch_estimate(case, path_kind),
         "temporary_bytes": _flagrand_temporary_bytes(case, path_kind),
-        "generator_state_bytes_estimate": _generator_state_bytes_estimate(case.generator),
+        "generator_state_bytes_estimate": state_bytes,
+        "generator_state_bytes_estimate_kind": state_kind,
     }
 
 
@@ -965,9 +1057,10 @@ def _semantic_metadata(case: HostApiCase, backend: str) -> dict[str, Any]:
             "semantic_model": "poisson_normal_approximation",
             "semantic_equivalence": "accepted_approximation",
         }
+    semantic_model = "poisson_cdf_table" if case.generator == "philox4x32_10" else "poisson_inverse_cdf"
     return {
         "semantic_mode": "strict",
-        "semantic_model": "poisson_inverse_cdf",
+        "semantic_model": semantic_model,
         "semantic_equivalence": "intended_strict_poisson",
     }
 
@@ -977,16 +1070,21 @@ def _flagrand_path_kind(case: HostApiCase) -> str:
     distribution = case.distribution
 
     if distribution in {"raw32", "raw64"}:
-        if info.kind == "qrng" and (case.dimensions or 1) > 1:
-            return "python_dim_loop_raw"
-        if case.generator in {"xorwow", "mrg32k3a", "mt19937", "mtgp32"}:
-            return "chunked_state_raw"
+        if info.kind == "qrng":
+            return "direct_quasi_table_raw"
+        if case.generator in {"mt19937", "mtgp32"}:
+            return "stateful_generator_raw"
+        if case.generator in {"xorwow", "mrg32k3a"}:
+            return "chunk_cached_generator_raw"
         return "direct_generator_raw"
 
     if case.generator == "philox4x32_10" and distribution in {
         "uniform_f32",
+        "uniform_f64",
         "normal_f32",
+        "normal_f64",
         "lognormal_f32",
+        "lognormal_f64",
         "poisson_u32",
     }:
         return "direct_philox_distribution"
@@ -999,13 +1097,13 @@ def _flagrand_path_kind(case: HostApiCase) -> str:
     }:
         return "direct_state_prng_distribution"
 
-    if case.generator == "mtgp32" and distribution == "uniform_f32":
-        return "direct_generator_distribution"
+    if case.generator in {"mt19937", "mtgp32"} and distribution == "uniform_f32":
+        return "stateful_generator_distribution"
 
-    if info.kind == "qrng" and (case.dimensions or 1) > 1:
-        return "python_dim_loop_raw_plus_transform"
-    if case.generator in {"xorwow", "mrg32k3a", "mt19937", "mtgp32"}:
-        return "chunked_state_raw_plus_transform"
+    if info.kind == "qrng":
+        return "direct_quasi_table_distribution"
+    if case.generator in {"mt19937", "mtgp32"}:
+        return "stateful_raw_plus_transform"
     return "raw_plus_transform"
 
 
@@ -1013,18 +1111,18 @@ def _flagrand_launch_estimate(case: HostApiCase, path_kind: str) -> int | None:
     if path_kind in {
         "direct_philox_distribution",
         "direct_state_prng_distribution",
-        "direct_generator_distribution",
         "direct_generator_raw",
+        "direct_quasi_table_raw",
+        "direct_quasi_table_distribution",
     }:
         return 1
-    if path_kind == "python_dim_loop_raw":
-        return max(1, int(case.dimensions or 1))
-    if path_kind == "python_dim_loop_raw_plus_transform":
-        return max(1, int(case.dimensions or 1)) + 1
-    if path_kind == "chunked_state_raw":
-        return _chunked_launch_estimate(case.generator, case.n)
-    if path_kind == "chunked_state_raw_plus_transform":
-        return _chunked_launch_estimate(case.generator, case.n) + 1
+    if path_kind in {
+        "chunk_cached_generator_raw",
+        "stateful_generator_raw",
+        "stateful_generator_distribution",
+        "stateful_raw_plus_transform",
+    }:
+        return None
     if path_kind == "raw_plus_transform":
         return 2
     return None
@@ -1040,22 +1138,19 @@ def _flagrand_temporary_bytes(case: HostApiCase, path_kind: str) -> int:
     return 0
 
 
-def _chunked_launch_estimate(generator: str, n: int) -> int:
-    if generator == "mtgp32":
-        chunk = 192 * 256
-    elif generator in {"xorwow", "mrg32k3a", "mt19937"}:
-        chunk = 1 << 20
-    else:
-        return 1
-    return max(1, (max(1, int(n)) + chunk - 1) // chunk)
-
-
-def _generator_state_bytes_estimate(generator: str) -> int | None:
-    if generator == "mt19937":
-        return 624 * torch.empty((), dtype=torch.int32).element_size()
-    if generator == "mtgp32":
-        return 192 * 1024 * torch.empty((), dtype=torch.int32).element_size()
-    return 0
+def _flagrand_state_bytes_estimate(case: HostApiCase, path_kind: str) -> tuple[int | None, str]:
+    item_bytes = torch.empty((), dtype=torch.int32).element_size()
+    if case.generator == "mt19937":
+        persistent = 2 * 3072 * 624 * item_bytes
+        return persistent, "persistent_working_state_and_scratch_lower_bound_excludes_prefetch_cache"
+    if case.generator == "mtgp32":
+        persistent = 192 * 1024 * item_bytes
+        return persistent, "persistent_working_state_excludes_shared_parameter_cache"
+    if path_kind == "chunk_cached_generator_raw":
+        return (1 << 20) * item_bytes, "retained_raw_chunk_cache_capacity"
+    if case.generator.startswith("sobol") or case.generator.startswith("scrambled_sobol"):
+        return 0, "generator_object_only_excludes_shared_quasi_table_cache"
+    return 0, "stateless_generator_object"
 
 
 def _distribution_kwargs(case: HostApiCase) -> dict[str, Any]:

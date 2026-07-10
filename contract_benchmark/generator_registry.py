@@ -20,6 +20,7 @@ class GeneratorInfo:
     supports_seed: bool
     supports_offset: bool
     notes: list[str]
+    supports_distributions_f64: bool = False
 
 
 GENERATOR_INFOS: dict[str, GeneratorInfo] = {
@@ -37,6 +38,7 @@ GENERATOR_INFOS: dict[str, GeneratorInfo] = {
         True,
         True,
         ["FlagRand Philox currently uses a benchmark-visible counter mapping, not cuRAND Host ordering."],
+        supports_distributions_f64=True,
     ),
     "xorwow": GeneratorInfo(
         "xorwow",
@@ -81,7 +83,7 @@ GENERATOR_INFOS: dict[str, GeneratorInfo] = {
         True,
         True,
         False,
-        ["FlagRand MTGP32 rejects non-zero offset."],
+        ["FlagRand can advance a non-zero offset, but cuRAND Host MTGP32 has no comparable skip-ahead offset contract."],
     ),
     "mt19937": GeneratorInfo(
         "mt19937",
@@ -138,10 +140,11 @@ GENERATOR_INFOS: dict[str, GeneratorInfo] = {
         True,
         False,
         True,
-        True,
+        False,
         False,
         True,
         ["cuRAND Host raw64 is native only for Sobol64 families."],
+        supports_distributions_f64=True,
     ),
     "scrambled_sobol64": GeneratorInfo(
         name="scrambled_sobol64",
@@ -153,9 +156,10 @@ GENERATOR_INFOS: dict[str, GeneratorInfo] = {
         supports_flagrand=True,
         supports_raw32=False,
         supports_raw64=True,
-        supports_distributions_f32=True,
+        supports_distributions_f32=False,
         supports_seed=False,
         supports_offset=True,
         notes=["cuRAND Host raw64 is native only for Sobol64 families."],
+        supports_distributions_f64=True,
     ),
 }

@@ -6,6 +6,7 @@ import triton.language as tl
 
 from flagrand._device import require_accelerator, assert_tensor_device_supported
 from flagrand.fused._internal.philox_direct import generate_philox_normal_f32
+from flagrand.fused._internal.philox_direct_f64 import generate_philox_normal_f64
 from flagrand.fused._internal.state_prng_direct import (
     generate_mrg32k3a_normal_f32,
     generate_xorwow_normal_f32,
@@ -16,13 +17,21 @@ from flagrand.fused._internal.utils import (
     GENERATOR_PHILOX,
     GENERATOR_XORWOW,
     GENERATOR_MRG32K3A,
+    GENERATOR_SOBOL32,
     GENERATOR_SOBOL64,
+    GENERATOR_SCRAMBLED_SOBOL32,
     GENERATOR_SCRAMBLED_SOBOL64,
     _generate_raw,
     _generate_raw64,
 )
 
 _64BIT_GENERATORS = {GENERATOR_SOBOL64, GENERATOR_SCRAMBLED_SOBOL64}
+_QUASI_GENERATORS = {
+    GENERATOR_SOBOL32,
+    GENERATOR_SOBOL64,
+    GENERATOR_SCRAMBLED_SOBOL32,
+    GENERATOR_SCRAMBLED_SOBOL64,
+}
 
 
 @triton.jit
@@ -73,10 +82,14 @@ def generate_normal(
 
     gen_type = get_generator_type(generator)
     is_64 = gen_type in _64BIT_GENERATORS
+    is_philox = gen_type == GENERATOR_PHILOX
 
     if is_64:
         if out.dtype != torch.float64:
             raise TypeError("generate_normal: float64 output required for Generator64.")
+    elif is_philox:
+        if out.dtype not in (torch.float32, torch.float64):
+            raise TypeError("generate_normal: Philox output must be float32 or float64.")
     else:
         if out.dtype != torch.float32:
             raise TypeError("generate_normal: float32 output required for Generator32.")
@@ -90,11 +103,28 @@ def generate_normal(
         raise ValueError(f"generate_normal: block_size must be > 0, got {block_size}.")
     if num_warps <= 0:
         raise ValueError(f"generate_normal: num_warps must be > 0, got {num_warps}.")
-    if n % 2 != 0:
-        raise ValueError(f"generate_normal: Box-Muller output requires an even element count, got {n}.")
+    if gen_type in _QUASI_GENERATORS:
+        generator.generate_normal(
+            out,
+            mean=mean,
+            stddev=stddev,
+            block_size=block_size,
+            num_warps=num_warps,
+        )
+        return out
 
-    if not is_64 and gen_type == GENERATOR_PHILOX:
+    if is_philox and out.dtype == torch.float32:
         generate_philox_normal_f32(
+            out,
+            generator,
+            mean=mean,
+            stddev=stddev,
+            block_size=block_size,
+            num_warps=num_warps,
+        )
+        return out
+    if is_philox and out.dtype == torch.float64:
+        generate_philox_normal_f64(
             out,
             generator,
             mean=mean,
@@ -109,6 +139,8 @@ def generate_normal(
     if not is_64 and gen_type == GENERATOR_MRG32K3A:
         generate_mrg32k3a_normal_f32(out, generator, mean=mean, stddev=stddev)
         return out
+    if n % 2 != 0:
+        raise ValueError(f"generate_normal: Box-Muller output requires an even element count, got {n}.")
 
     if is_64:
         raw = _generate_raw64(generator, out.shape, out.device)

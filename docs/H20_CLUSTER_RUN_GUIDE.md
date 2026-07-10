@@ -16,10 +16,41 @@ H20 集群登录节点没有 GPU，`nvidia-smi` 找不到是正常的。不要�
 本仓库已经包含：
 
 - `contract_benchmark/`：新的 contract-style cuRAND benchmark。
-- `src/flagrand/`：运行 benchmark 必需的 FlagRand 源码与 Sobol/MTGP 参数数据。
+- `src/flagrand/`：运行 benchmark 必需的重构后 FlagRand 源码与 Sobol/MTGP 参数数据。
 - `scripts/h20_*.sh`：按公司 Slurm + Docker 规范封装的运行脚本。
 
 因此公司集群上 clone 本仓库即可运行，不需要再额外复制 `flagrand-main/src`。
+
+### FlagRand 来源与边界
+
+当前 vendored 源码固定为：
+
+```text
+repository: https://github.com/2005WUYU/FlagRand_RTX4060.git
+upstream commit: 14f904077474d276fe9e966f42bb16ad194a1a73
+source: src/flagrand
+public compatibility facade: flagrand.curand
+```
+
+`contract_benchmark/flagrand_vendor.json` 同时记录 upstream commit、文件数和 `.py`/`.pt` tree hash。
+`scripts/verify_flagrand_vendor.py` 会验证实际 import 来自本仓库的 `src/flagrand`、
+`flagrand.curand` 必需符号完整，并且源码树与 manifest 一致。它只做验证，不会联网 fetch、
+checkout 或静默替换源码。
+
+本 benchmark 的 FlagRand public API 路径统一通过重构上游提供的 `flagrand.curand` facade。
+这个 facade 是 FlagRand generator 上的 cuRAND-shaped Python API，不是 `libcurand` wrapper，
+也不表示输出 ordering 与 cuRAND 相同。
+
+Host-API-only 矩阵中，Philox 除 f32 外还覆盖 upstream direct path 的
+`uniform_f64`、`normal_f64`、`lognormal_f64`；这不等于 Philox 支持 `raw64`。
+Philox 原始输出仍只有 `raw32`，native `raw64` 只属于 Sobol64 families。
+
+还要区分两类名字里都含 “fused” 的代码：
+
+- `src/flagrand/fused/` 属于上述固定 commit 的上游 FlagRand 源码，public facade 会调用它。
+- `contract_benchmark/kernels.py` 中 F0/F1/F2/M2/M3 的 Philox generate+consume 内核属于
+  benchmark-local 实验实现；结果虽使用 `flagrand_fused_philox` 名称，但 record 的
+  `api_surface` 是 `flagrand_benchmark_kernel`，不能写成“上游 FlagRand fused API”。
 
 ## 2. 来自公司规范的关键约束
 
@@ -103,9 +134,20 @@ PY"
 
 ### 5.1 Smoke
 
-在仓库根目录执行：
+在仓库根目录执行。以下命令假设 `$NODE` 已设为正式测试所用、且本地已有目标镜像的
+H20 节点；smoke 与正式跑必须使用同一个 image/node 组合：
 
 ```bash
+IMAGE=flagrand-cuda13-curanddx:latest \
+IMAGE_TAR=/data/nfs3/flagrand-cuda13-curanddx-latest.tar \
+H20_NODELIST=$NODE \
+MATHDX_ROOT=/opt/mathdx/current \
+CPATH=/opt/mathdx/current/include/curanddx:/opt/mathdx/current/include \
+CMAKE_PREFIX_PATH=/opt/mathdx/current \
+NUM_GPUS=1 \
+MEM_PER_GPU_MB=32768 \
+SLURM_PARTITION=debug \
+TIME_LIMIT=01:00:00 \
 bash scripts/h20_smoke.sh
 ```
 
@@ -113,16 +155,21 @@ bash scripts/h20_smoke.sh
 
 ```text
 srun -p debug --gres=gpu:1 ...
-  docker run --rm --gpus all -v "$PWD":/workspace -w /workspace flagtree-nvidia:3.6-v2
-    python run_benchmark.py --profile local_smoke
+  docker run --rm --gpus all -v "$PWD":/workspace -w /workspace <IMAGE>
+    python scripts/verify_flagrand_vendor.py
+      && python run_benchmark.py --profile local_smoke
 ```
 
 期望：
 
 ```text
+[flagrand-preflight] ... verified=true
 fail=0
 unsupported 可以存在
 ```
+
+任何 preflight 错误都应直接停止：这通常表示 H20 拉取的仓库版本不完整、vendored tree
+被改动，或容器从别处 import 了同名 `flagrand`。不要在 preflight 失败时继续收集 timing。
 
 `unsupported` 常见来源：
 
@@ -133,15 +180,7 @@ unsupported 可以存在
 这些不是 smoke 失败，但必须保留在结果里。
 
 登录节点只负责提交任务和挂载仓库；真实 Python/CUDA/cuRANDDx 环境以
-`docker run ... <image>` 内部为准。使用带 MathDx/cuRANDDx 的镜像时可覆盖：
-
-```bash
-IMAGE=flagrand-cuda13-curanddx:latest \
-H20_NODELIST=bjdb-h20-node-038 \
-MATHDX_ROOT=/opt/mathdx/current \
-CPATH=/opt/mathdx/current/include/curanddx:/opt/mathdx/current/include \
-bash scripts/h20_benchmark.sh
-```
+`docker run ... <image>` 内部为准。
 
 `capability_matrix.json` 和 `REPORT.md` 会记录 cuRANDDx headers 是否在容器内被找到、
 cuRANDDx extension 是否成功 import、构建目录和导出的符号。
@@ -166,20 +205,61 @@ launcher 会用提交任务用户的 UID/GID 运行容器，避免 NFS/root-squa
 
 ### 5.2 分阶段正式跑
 
-只对比 cuRAND Host API 与 FlagRand public API 时，不使用原 task/gate benchmark；
-直接运行独立入口：
+推荐顺序固定为：
+
+```text
+同 image/node 的 1-GPU smoke
+  -> hostapi-only 全量（先验证最直接的 public API 对比）
+    -> 完整 task/gate benchmark（含 Device/cuRANDDx extension 与 fused/memory/QRNG）
+```
+
+第 1 步 smoke 必须先达到 `fail=0`。第 2 步只对比 cuRAND Host API 与 FlagRand
+public API，不使用原 task/gate benchmark；执行：
 
 ```bash
 IMAGE=flagrand-cuda13-curanddx:latest \
-H20_NODELIST=bjdb-h20-node-038 \
+IMAGE_TAR=/data/nfs3/flagrand-cuda13-curanddx-latest.tar \
+H20_NODELIST=$NODE \
+MATHDX_ROOT=/opt/mathdx/current \
+CPATH=/opt/mathdx/current/include/curanddx:/opt/mathdx/current/include \
+CMAKE_PREFIX_PATH=/opt/mathdx/current \
 NUM_GPUS=4 \
+MEM_PER_GPU_MB=200000 \
 SLURM_PARTITION=long \
 TIME_LIMIT=08:00:00 \
 PROFILE=h20 \
 bash scripts/h20_hostapi_benchmark.sh
 ```
 
+hostapi-only 中任何 runtime error、validation failure 或 unsupported row 都会把
+`run_health` 标为 `needs_attention` 并让 launcher 非零退出，不能只看 Slurm job 是否跑完。
+
 详细范围、参数和输出见 `docs/HOSTAPI_ONLY_BENCHMARK.md`。
+
+第 3 步运行复杂完整 benchmark：
+
+```bash
+IMAGE=flagrand-cuda13-curanddx:latest \
+IMAGE_TAR=/data/nfs3/flagrand-cuda13-curanddx-latest.tar \
+H20_NODELIST=$NODE \
+MATHDX_ROOT=/opt/mathdx/current \
+CPATH=/opt/mathdx/current/include/curanddx:/opt/mathdx/current/include \
+CMAKE_PREFIX_PATH=/opt/mathdx/current \
+NUM_GPUS=4 \
+MEM_PER_GPU_MB=200000 \
+SLURM_PARTITION=long \
+TIME_LIMIT=08:00:00 \
+PROFILE=h20 \
+GROUPS=all \
+BUILD_DEVICE_EXT=1 \
+ALLOW_DEVICE_EXT_FAILURE=0 \
+bash scripts/h20_benchmark.sh
+```
+
+两个正式 launcher 都会在计时前重新运行 vendored FlagRand preflight。复杂 benchmark
+的 preflight 位于 native Device/cuRANDDx extension 构建之前，因此源码来源不对时会尽早退出。
+
+如果需要把复杂 benchmark 拆阶段跑，使用下面两步代替上面的 `GROUPS=all`。
 
 先跑 Host API 与基础任务，适合 `debug` 队列：
 
@@ -203,7 +283,7 @@ BUILD_DEVICE_EXT=1 \
 bash scripts/h20_benchmark.sh
 ```
 
-如果希望一次全跑：
+如果已经在 shell 中 `export` 了前述 image/node/MathDx 变量，也可用简写一次全跑：
 
 ```bash
 SLURM_PARTITION=long \
@@ -288,7 +368,7 @@ srun -p debug --gres=gpu:1 --cpus-per-task=8 --mem=32G --time=01:00:00 bash -lc 
     -v "$PWD":/workspace \
     -w /workspace \
     flagtree-nvidia:3.6-v2 \
-    bash -lc "python run_benchmark.py --profile local_smoke"
+    bash -lc "python scripts/verify_flagrand_vendor.py && python run_benchmark.py --profile local_smoke"
 '
 ```
 
@@ -360,6 +440,11 @@ FlagRand RNG 本体因此比 cuRAND 快。
 ```
 
 要回答 RNG 本体，看 `H0` 或 Device output-only 任务。
+
+此外，F0/F1/F2/M2/M3 的 `flagrand_fused_philox` 来自
+`contract_benchmark/kernels.py` 的 benchmark-local Triton 内核，并非 pinned upstream
+FlagRand 的 `src/flagrand/fused/` public implementation。报告中应写“benchmark-local
+FlagRand-side fused candidate”或同等明确的表述，不能把它当成 upstream FlagRand 产品能力。
 
 ## 9. 旧 H20 benchmark 参考
 
@@ -445,6 +530,22 @@ import flagrand
 print(flagrand.__file__)
 PY
 ```
+
+### FlagRand preflight 失败
+
+先直接复现验证，并检查输出中的 expected/module path、缺失 facade symbol 和 tree hash：
+
+```bash
+python scripts/verify_flagrand_vendor.py
+git status --short src/flagrand contract_benchmark/flagrand_vendor.json
+git rev-parse HEAD
+```
+
+preflight 校验的是 vendored upstream snapshot，不要求 benchmark 仓库自己的 commit 等于
+FlagRand upstream commit。正确状态是 `contract_benchmark/flagrand_vendor.json` 内记录的 upstream commit 为
+`14f904077474d276fe9e966f42bb16ad194a1a73`，并且输出 `verified=true`。如果 tree hash 不符，
+应回到本机确认 vendoring 后重新 commit/push，再在 H20 端 `git pull --ff-only`；不要在 H20
+上临时改 manifest 绕过检查。
 
 ### 找不到 cuRAND shared library
 

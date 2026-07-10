@@ -12,6 +12,7 @@ from typing import Any
 import torch
 
 from contract_benchmark.curand_ctypes import library_load_report
+from contract_benchmark.flagrand_provenance import flagrand_source_report
 from contract_benchmark.spec import TaskSpec
 
 
@@ -102,6 +103,7 @@ def collect_environment(profile_name: str) -> dict[str, Any]:
         "cuda_available": cuda_available,
         "cuda_runtime_from_torch": torch.version.cuda,
         "curand": curand_report,
+        "flagrand": flagrand_source_report(verify_tree=True),
         "time_unix": time.time(),
     }
     if cuda_available:

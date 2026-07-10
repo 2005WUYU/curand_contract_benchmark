@@ -11,7 +11,7 @@ export TIME_LIMIT="${TIME_LIMIT:-08:00:00}"
 export JOB_NAME="${JOB_NAME:-curand-h20-hostapi-only}"
 
 PROFILE="${PROFILE:-h20}"
-CMD="python scripts/hostapi_only_benchmark.py --profile ${PROFILE} --num-gpus ${NUM_GPUS}"
+CMD="python scripts/verify_flagrand_vendor.py && python scripts/hostapi_only_benchmark.py --profile ${PROFILE} --num-gpus ${NUM_GPUS}"
 
 if [ -n "${HOSTAPI_GENERATORS:-}" ]; then
   CMD="${CMD} --generators ${HOSTAPI_GENERATORS}"
@@ -31,6 +31,18 @@ fi
 if [ -n "${HOSTAPI_REPEATS:-}" ]; then
   CMD="${CMD} --repeats ${HOSTAPI_REPEATS}"
 fi
+if [ -n "${HOSTAPI_SEED:-}" ]; then
+  CMD="${CMD} --seed ${HOSTAPI_SEED}"
+fi
+if [ -n "${HOSTAPI_OFFSET:-}" ]; then
+  CMD="${CMD} --offset ${HOSTAPI_OFFSET}"
+fi
+if [ -n "${HOSTAPI_ORDERING:-}" ]; then
+  CMD="${CMD} --ordering ${HOSTAPI_ORDERING}"
+fi
+if [ -n "${HOSTAPI_QRNG_DIMENSIONS:-}" ]; then
+  CMD="${CMD} --qrng-dimensions ${HOSTAPI_QRNG_DIMENSIONS}"
+fi
 if [ -n "${HOSTAPI_MAX_CASES:-}" ]; then
   CMD="${CMD} --max-cases ${HOSTAPI_MAX_CASES}"
 fi
@@ -39,4 +51,3 @@ if [ -n "${HOSTAPI_RESULTS_DIR:-}" ]; then
 fi
 
 exec "${SCRIPT_DIR}/h20_srun_docker.sh" "${CMD}"
-

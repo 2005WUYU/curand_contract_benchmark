@@ -30,7 +30,7 @@ else
   CMD="python run_benchmark.py --profile ${PROFILE} --groups ${BENCHMARK_GROUPS}"
 fi
 
-PREFIX_CMD=""
+PREFIX_CMD="python scripts/verify_flagrand_vendor.py && "
 if [ "${BUILD_DEVICE_EXT}" = "1" ]; then
   if [ "${ALLOW_DEVICE_EXT_FAILURE}" = "1" ]; then
     PREFIX_CMD="${PREFIX_CMD}(python native/build_curand_device_extension.py --verbose || true) && "

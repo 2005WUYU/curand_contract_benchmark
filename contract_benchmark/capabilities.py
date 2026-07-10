@@ -4,12 +4,14 @@ from typing import Any
 
 from contract_benchmark.curanddx_support import curanddx_status
 from contract_benchmark.curand_library import library_load_report
+from contract_benchmark.flagrand_provenance import flagrand_source_report
 from contract_benchmark.generator_registry import GENERATOR_INFOS
 
 
 def capability_matrix() -> dict[str, Any]:
     matrix: dict[str, Any] = {
         "curand_host": library_load_report(),
+        "flagrand_source": flagrand_source_report(verify_tree=False),
         "generators": {},
         "device_api_extension": optional_device_extension_status(),
         "curanddx": curanddx_status(),
@@ -22,6 +24,7 @@ def capability_matrix() -> dict[str, Any]:
             "raw32": info.supports_raw32,
             "raw64_native": info.supports_raw64,
             "distributions_f32": info.supports_distributions_f32,
+            "distributions_f64": info.supports_distributions_f64,
             "supports_seed": info.supports_seed,
             "supports_offset": info.supports_offset,
             "notes": info.notes,

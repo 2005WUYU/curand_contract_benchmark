@@ -105,7 +105,7 @@ def measure_curand_and_flagrand_raw(
             else:
                 gen = make_flagrand_generator(generator, seed=ctx.seed, offset=ctx.offset, dimensions=dimensions)
                 run_once = lambda: flagrand_generate_by_distribution(gen, out, distribution)
-                api_surface = "flagrand_public_api"
+                api_surface = "flagrand.curand"
             validation = validate_after(run_once, lambda: validate_raw_tensor(out, dtype=dtype, n=n))
             timing = collect_cuda_event_and_wall_us(run_once, warmup_iters=ctx.profile.warmup, repeats=ctx.profile.repeats)
             if backend == "curand_host":
@@ -141,7 +141,7 @@ def measure_curand_and_flagrand_distribution(
             else:
                 gen = make_flagrand_generator(generator, seed=ctx.seed, offset=ctx.offset)
                 run_once = lambda: flagrand_generate_by_distribution(gen, out, distribution, lambda_val=lambda_val)
-                api_surface = "flagrand_public_api"
+                api_surface = "flagrand.curand"
             validation = validate_after(run_once, lambda: validate_distribution(out, distribution, n, lambda_val=lambda_val))
             timing = collect_cuda_event_and_wall_us(run_once, warmup_iters=ctx.profile.warmup, repeats=ctx.profile.repeats)
             if backend == "curand_host":

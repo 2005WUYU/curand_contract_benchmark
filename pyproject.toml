@@ -20,3 +20,4 @@ include = ["contract_benchmark*", "flagrand*"]
 
 [tool.setuptools.package-data]
 "flagrand.rng" = ["data/*.pt"]
+"contract_benchmark" = ["flagrand_vendor.json"]

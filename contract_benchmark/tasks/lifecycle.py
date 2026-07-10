@@ -26,7 +26,7 @@ def run_lifecycle(ctx: BenchmarkContext, spec: TaskSpec) -> list[dict[str, Any]]
 
     for backend, api_surface, run_once in (
         ("curand_host_lifecycle", "curand_host_api", curand_once),
-        ("flagrand_lifecycle", "flagrand_public_api", flagrand_once),
+        ("flagrand_lifecycle", "flagrand.curand", flagrand_once),
     ):
         try:
             validation = validation_pass({"status_success": True})
@@ -108,7 +108,7 @@ def run_first_vs_steady(ctx: BenchmarkContext, spec: TaskSpec) -> list[dict[str,
             if backend == "curand_host":
                 api_surface = "curand_host_api"
             else:
-                api_surface = "flagrand_public_api"
+                api_surface = "flagrand.curand"
 
             validation_out = torch.empty(n, device=ctx.device, dtype=torch.float32)
             validation_run, validation_cleanup = make_uniform_once(ctx, backend, generator, validation_out)

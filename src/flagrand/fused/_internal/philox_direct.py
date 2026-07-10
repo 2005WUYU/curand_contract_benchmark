@@ -4,7 +4,8 @@ import torch
 import triton
 import triton.language as tl
 
-from flagrand.fused._internal.transforms import uint32_to_uniform, uniform_to_normal
+from flagrand.fused._internal.philox_poisson_table import generate_philox_poisson_table_u32
+from flagrand.fused._internal.transforms import uint32_to_uniform, uniform_to_normal_fast_f32
 
 
 @triton.jit
@@ -15,19 +16,6 @@ def _philox_generate(seed, counter):
     c2 = c.to(tl.uint32)
     c3 = (c >> 32).to(tl.uint32)
     return tl.philox(seed, c0, c1, c2, c3)
-
-
-@triton.jit
-def _poisson_inverse_from_uniform(u, lambda_val, MAX_K: tl.constexpr):
-    p = tl.exp(-lambda_val)
-    cdf = p
-    k = tl.full(u.shape, 0, tl.int32)
-    for i in range(1, MAX_K + 1):
-        active = u > cdf
-        p = p * lambda_val / i
-        cdf += p
-        k = tl.where(active, i, k)
-    return k
 
 
 @triton.jit
@@ -61,18 +49,19 @@ def _philox_normal_f32_kernel(out_ptr, seed, base_counter, n, n_counters, mean, 
     u1 = uint32_to_uniform(r1)
     u2 = uint32_to_uniform(r2)
     u3 = uint32_to_uniform(r3)
-    n0, n1 = uniform_to_normal(u0, u1)
-    n2, n3 = uniform_to_normal(u2, u3)
+    n0, n1 = uniform_to_normal_fast_f32(u0, u1)
+    n2, n3 = uniform_to_normal_fast_f32(u2, u3)
 
     y0 = mean + stddev * n0
     y1 = mean + stddev * n1
     y2 = mean + stddev * n2
     y3 = mean + stddev * n3
 
-    tl.store(out_ptr + base + 0, y0, mask=mask & (base + 0 < n))
-    tl.store(out_ptr + base + 1, y1, mask=mask & (base + 1 < n))
-    tl.store(out_ptr + base + 2, y2, mask=mask & (base + 2 < n))
-    tl.store(out_ptr + base + 3, y3, mask=mask & (base + 3 < n))
+    y01 = tl.join(y0, y1)
+    y23 = tl.join(y2, y3)
+    tile = tl.reshape(tl.join(y01, y23), (BLOCK, 4))
+    offsets = base[:, None] + tl.arange(0, 4)[None, :]
+    tl.store(out_ptr + offsets, tile, mask=mask[:, None] & (offsets < n))
 
 
 @triton.jit
@@ -87,43 +76,19 @@ def _philox_lognormal_f32_kernel(out_ptr, seed, base_counter, n, n_counters, mea
     u1 = uint32_to_uniform(r1)
     u2 = uint32_to_uniform(r2)
     u3 = uint32_to_uniform(r3)
-    n0, n1 = uniform_to_normal(u0, u1)
-    n2, n3 = uniform_to_normal(u2, u3)
+    n0, n1 = uniform_to_normal_fast_f32(u0, u1)
+    n2, n3 = uniform_to_normal_fast_f32(u2, u3)
 
     y0 = tl.exp(mean + stddev * n0)
     y1 = tl.exp(mean + stddev * n1)
     y2 = tl.exp(mean + stddev * n2)
     y3 = tl.exp(mean + stddev * n3)
 
-    tl.store(out_ptr + base + 0, y0, mask=mask & (base + 0 < n))
-    tl.store(out_ptr + base + 1, y1, mask=mask & (base + 1 < n))
-    tl.store(out_ptr + base + 2, y2, mask=mask & (base + 2 < n))
-    tl.store(out_ptr + base + 3, y3, mask=mask & (base + 3 < n))
-
-
-@triton.jit
-def _philox_poisson_small_u32_kernel(
-    out_ptr,
-    seed,
-    base_counter,
-    n,
-    n_counters,
-    lambda_val,
-    BLOCK: tl.constexpr,
-    MAX_K: tl.constexpr,
-):
-    pid = tl.program_id(0)
-    offs = pid * BLOCK + tl.arange(0, BLOCK)
-    mask = offs < n_counters
-    base = (offs * 4)[:, None] + tl.arange(0, 4)[None, :]
-
-    r0, r1, r2, r3 = _philox_generate(seed, base_counter + offs)
-    u01 = tl.join(uint32_to_uniform(r0), uint32_to_uniform(r1))
-    u23 = tl.join(uint32_to_uniform(r2), uint32_to_uniform(r3))
-    uniforms = tl.reshape(tl.join(u01, u23), (BLOCK, 4))
-    k = _poisson_inverse_from_uniform(uniforms, lambda_val, MAX_K)
-
-    tl.store(out_ptr + base, k, mask=mask[:, None] & (base < n))
+    y01 = tl.join(y0, y1)
+    y23 = tl.join(y2, y3)
+    tile = tl.reshape(tl.join(y01, y23), (BLOCK, 4))
+    offsets = base[:, None] + tl.arange(0, 4)[None, :]
+    tl.store(out_ptr + offsets, tile, mask=mask[:, None] & (offsets < n))
 
 
 @triton.jit
@@ -138,8 +103,8 @@ def _philox_poisson_large_u32_kernel(out_ptr, seed, base_counter, n, n_counters,
     u1 = uint32_to_uniform(r1)
     u2 = uint32_to_uniform(r2)
     u3 = uint32_to_uniform(r3)
-    n0, n1 = uniform_to_normal(u0, u1)
-    n2, n3 = uniform_to_normal(u2, u3)
+    n0, n1 = uniform_to_normal_fast_f32(u0, u1)
+    n2, n3 = uniform_to_normal_fast_f32(u2, u3)
     sigma = tl.sqrt(lambda_val)
 
     k0 = tl.maximum(0, tl.floor(lambda_val + sigma * n0)).to(tl.int32)
@@ -236,15 +201,12 @@ def generate_philox_poisson_u32(
     seed_val, offset_val, n_counters = _philox_launch_args(out, generator, "generate_poisson")
     grid = (triton.cdiv(n_counters, block_size),)
     if lambda_val < 30.0:
-        _philox_poisson_small_u32_kernel[grid](
-            out.view(-1),
-            seed_val,
-            offset_val // 4,
-            out.numel(),
-            n_counters,
-            lambda_val,
-            BLOCK=block_size,
-            MAX_K=max_k,
+        generate_philox_poisson_table_u32(
+            out,
+            seed=seed_val,
+            offset=offset_val,
+            lambda_val=lambda_val,
+            block_size=block_size,
             num_warps=num_warps,
         )
     else:

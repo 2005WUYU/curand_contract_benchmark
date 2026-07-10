@@ -11,4 +11,4 @@ export TIME_LIMIT="${TIME_LIMIT:-01:00:00}"
 export JOB_NAME="${JOB_NAME:-curand-smoke}"
 
 exec "${SCRIPT_DIR}/h20_srun_docker.sh" \
-  "python run_benchmark.py --profile local_smoke"
+  "python scripts/verify_flagrand_vendor.py && python run_benchmark.py --profile local_smoke"

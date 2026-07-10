@@ -42,7 +42,7 @@ def run_q1(ctx: BenchmarkContext, spec: TaskSpec) -> list[dict[str, Any]]:
                 else:
                     gen = make_flagrand_generator(generator, seed=ctx.seed, offset=0, dimensions=dimensions)
                     run_once = lambda: flagrand_generate_by_distribution(gen, out, "uniform_f32")
-                    api_surface = "flagrand_public_api"
+                    api_surface = "flagrand.curand"
                     validation = validate_after(run_once, lambda: validate_uniform(out, n=n))
                     timing = collect_cuda_event_and_wall_us(run_once, warmup_iters=ctx.profile.warmup, repeats=ctx.profile.repeats)
                 records.append(
