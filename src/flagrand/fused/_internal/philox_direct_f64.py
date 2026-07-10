@@ -4,6 +4,7 @@ import torch
 import triton
 import triton.language as tl
 
+from flagrand.runtime import CachedKernelLauncher
 from flagrand.fused._internal.transforms import (
     uint32_pair_to_uniform64_curand_compat,
     uniform_to_normal_trig_f64,
@@ -74,6 +75,16 @@ def _philox_normal_f64_kernel(
     tl.store(out_ptr + offsets, tile, mask=mask[:, None] & (offsets < n))
 
 
+_PHILOX_UNIFORM_F64_LAUNCHER = CachedKernelLauncher(
+    _philox_uniform_f64_kernel,
+    constexpr_names=("BLOCK",),
+)
+_PHILOX_NORMAL_F64_LAUNCHER = CachedKernelLauncher(
+    _philox_normal_f64_kernel,
+    constexpr_names=("LOGNORMAL", "STANDARD", "BLOCK"),
+)
+
+
 def generate_philox_uniform_f64(
     out: torch.Tensor,
     generator,
@@ -82,15 +93,12 @@ def generate_philox_uniform_f64(
     num_warps: int,
 ) -> None:
     seed_val, offset_val, n_counters = _philox_launch_args_f64(out, generator, "generate_uniform")
-    grid = (triton.cdiv(n_counters, block_size),)
-    _philox_uniform_f64_kernel[grid](
-        out.view(-1),
-        seed_val,
-        offset_val // 4,
-        out.numel(),
-        n_counters,
-        BLOCK=block_size,
-        num_warps=num_warps,
+    grid = triton.cdiv(n_counters, block_size)
+    _PHILOX_UNIFORM_F64_LAUNCHER.launch(
+        grid,
+        (out, seed_val, offset_val // 4, out.numel(), n_counters),
+        (block_size,),
+        (num_warps,),
     )
     generator.offset = offset_val + 4 * n_counters
 
@@ -149,25 +157,20 @@ def _generate_philox_normal_like_f64(
     op_name: str,
 ) -> None:
     seed_val, offset_val, n_counters = _philox_launch_args_f64(out, generator, op_name)
-    grid = (triton.cdiv(n_counters, block_size),)
-    _philox_normal_f64_kernel[grid](
-        out.view(-1),
-        seed_val,
-        offset_val // 4,
-        out.numel(),
-        n_counters,
-        mean,
-        stddev,
-        LOGNORMAL=lognormal,
-        STANDARD=mean == 0.0 and stddev == 1.0,
-        BLOCK=block_size,
-        num_warps=num_warps,
+    grid = triton.cdiv(n_counters, block_size)
+    _PHILOX_NORMAL_F64_LAUNCHER.launch(
+        grid,
+        (out, seed_val, offset_val // 4, out.numel(), n_counters, mean, stddev),
+        (lognormal, mean == 0.0 and stddev == 1.0, block_size),
+        (num_warps,),
     )
     generator.offset = offset_val + 4 * n_counters
 
 
 def _philox_launch_args_f64(out: torch.Tensor, generator, op_name: str) -> tuple[int, int, int]:
     n = out.numel()
+    if not out.is_contiguous():
+        raise ValueError(f"{op_name}: output must be contiguous.")
     if n % 2 != 0:
         raise ValueError(f"{op_name}: Philox float64 path requires an even element count, got {n}.")
     offset_val = int(getattr(generator, "offset", 0))

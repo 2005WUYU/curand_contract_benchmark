@@ -4,6 +4,7 @@ import torch
 import triton
 import triton.language as tl
 
+from flagrand.runtime import CachedKernelLauncher
 from flagrand.fused._internal.philox_poisson_table import generate_philox_poisson_table_u32
 from flagrand.fused._internal.transforms import uint32_to_uniform, uniform_to_normal_fast_f32
 
@@ -118,6 +119,24 @@ def _philox_poisson_large_u32_kernel(out_ptr, seed, base_counter, n, n_counters,
     tl.store(out_ptr + base + 3, k3, mask=mask & (base + 3 < n))
 
 
+_PHILOX_UNIFORM_F32_LAUNCHER = CachedKernelLauncher(
+    _philox_uniform_f32_kernel,
+    constexpr_names=("BLOCK",),
+)
+_PHILOX_NORMAL_F32_LAUNCHER = CachedKernelLauncher(
+    _philox_normal_f32_kernel,
+    constexpr_names=("BLOCK",),
+)
+_PHILOX_LOGNORMAL_F32_LAUNCHER = CachedKernelLauncher(
+    _philox_lognormal_f32_kernel,
+    constexpr_names=("BLOCK",),
+)
+_PHILOX_POISSON_LARGE_LAUNCHER = CachedKernelLauncher(
+    _philox_poisson_large_u32_kernel,
+    constexpr_names=("BLOCK",),
+)
+
+
 def generate_philox_uniform_f32(
     out: torch.Tensor,
     generator,
@@ -127,14 +146,12 @@ def generate_philox_uniform_f32(
     op_name: str = "generate_uniform",
 ) -> None:
     seed_val, offset_val, n_counters = _philox_launch_args(out, generator, op_name)
-    grid = (triton.cdiv(n_counters, block_size),)
-    _philox_uniform_f32_kernel[grid](
-        out.view(-1),
-        seed_val,
-        offset_val // 4,
-        n_counters,
-        BLOCK=block_size,
-        num_warps=num_warps,
+    grid = triton.cdiv(n_counters, block_size)
+    _PHILOX_UNIFORM_F32_LAUNCHER.launch(
+        grid,
+        (out, seed_val, offset_val // 4, n_counters),
+        (block_size,),
+        (num_warps,),
     )
     generator.offset = offset_val + out.numel()
 
@@ -149,17 +166,12 @@ def generate_philox_normal_f32(
     num_warps: int,
 ) -> None:
     seed_val, offset_val, n_counters = _philox_launch_args(out, generator, "generate_normal")
-    grid = (triton.cdiv(n_counters, block_size),)
-    _philox_normal_f32_kernel[grid](
-        out.view(-1),
-        seed_val,
-        offset_val // 4,
-        out.numel(),
-        n_counters,
-        mean,
-        stddev,
-        BLOCK=block_size,
-        num_warps=num_warps,
+    grid = triton.cdiv(n_counters, block_size)
+    _PHILOX_NORMAL_F32_LAUNCHER.launch(
+        grid,
+        (out, seed_val, offset_val // 4, out.numel(), n_counters, mean, stddev),
+        (block_size,),
+        (num_warps,),
     )
     generator.offset = offset_val + out.numel()
 
@@ -174,17 +186,12 @@ def generate_philox_lognormal_f32(
     num_warps: int,
 ) -> None:
     seed_val, offset_val, n_counters = _philox_launch_args(out, generator, "generate_lognormal")
-    grid = (triton.cdiv(n_counters, block_size),)
-    _philox_lognormal_f32_kernel[grid](
-        out.view(-1),
-        seed_val,
-        offset_val // 4,
-        out.numel(),
-        n_counters,
-        mean,
-        stddev,
-        BLOCK=block_size,
-        num_warps=num_warps,
+    grid = triton.cdiv(n_counters, block_size)
+    _PHILOX_LOGNORMAL_F32_LAUNCHER.launch(
+        grid,
+        (out, seed_val, offset_val // 4, out.numel(), n_counters, mean, stddev),
+        (block_size,),
+        (num_warps,),
     )
     generator.offset = offset_val + out.numel()
 
@@ -194,12 +201,11 @@ def generate_philox_poisson_u32(
     generator,
     *,
     lambda_val: float,
-    max_k: int,
     block_size: int,
     num_warps: int,
 ) -> None:
     seed_val, offset_val, n_counters = _philox_launch_args(out, generator, "generate_poisson")
-    grid = (triton.cdiv(n_counters, block_size),)
+    grid = triton.cdiv(n_counters, block_size)
     if lambda_val < 30.0:
         generate_philox_poisson_table_u32(
             out,
@@ -210,21 +216,19 @@ def generate_philox_poisson_u32(
             num_warps=num_warps,
         )
     else:
-        _philox_poisson_large_u32_kernel[grid](
-            out.view(-1),
-            seed_val,
-            offset_val // 4,
-            out.numel(),
-            n_counters,
-            lambda_val,
-            BLOCK=block_size,
-            num_warps=num_warps,
+        _PHILOX_POISSON_LARGE_LAUNCHER.launch(
+            grid,
+            (out, seed_val, offset_val // 4, out.numel(), n_counters, lambda_val),
+            (block_size,),
+            (num_warps,),
         )
     generator.offset = offset_val + out.numel()
 
 
 def _philox_launch_args(out: torch.Tensor, generator, op_name: str) -> tuple[int, int, int]:
     n = out.numel()
+    if not out.is_contiguous():
+        raise ValueError(f"{op_name}: output must be contiguous.")
     if n % 4 != 0:
         raise ValueError(
             f"{op_name}: Philox requires element count to be a multiple of 4, got {n}."

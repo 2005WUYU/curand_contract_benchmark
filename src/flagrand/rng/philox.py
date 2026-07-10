@@ -6,6 +6,8 @@ import torch
 import triton
 import triton.language as tl
 
+from flagrand.runtime import CachedKernelLauncher
+
 
 @triton.jit
 def _philox_generate(seed, counter):
@@ -35,6 +37,12 @@ def _philox_kernel(out_ptr, seed, base_counter, n, BLOCK: tl.constexpr):
     tl.store(out_ptr + base, tile.to(tl.int32, bitcast=True), mask=mask[:, None])
 
 
+_PHILOX_RAW_LAUNCHER = CachedKernelLauncher(
+    _philox_kernel,
+    constexpr_names=("BLOCK",),
+)
+
+
 @dataclass
 class PhiloxGenerator:
     seed: int = 0
@@ -55,33 +63,57 @@ class PhiloxGenerator:
         block_size = kwargs.get("block_size", 512)
         num_warps = kwargs.get("num_warps", 4)
 
-        n = out.numel()
-        if n % 4 != 0:
-            raise ValueError(
-                f"Philox: element count must be a multiple of 4, got {n}."
-            )
-
-        seed_val = self.seed if seed is None else int(seed)
-        offset_val = self.offset if offset is None else int(offset)
-        if offset_val < 0:
-            raise ValueError(f"Philox: offset must be >= 0, got {offset_val}.")
-        if offset_val % 4 != 0:
-            raise ValueError(
-                f"Philox: offset is measured in uint32 outputs and must be "
-                f"a multiple of 4 for vectorized Philox4, got {offset_val}."
-            )
-
-        n_counters = n // 4
-        base_counter = offset_val // 4
-        grid = (triton.cdiv(n_counters, block_size),)
-        _philox_kernel[grid](
-            out.view(-1),
-            seed_val,
-            base_counter,
-            n_counters,
-            BLOCK=block_size,
+        return generate_philox_raw_u32(
+            out,
+            self,
+            seed=seed,
+            offset=offset,
+            block_size=block_size,
             num_warps=num_warps,
         )
-        if seed is None and offset is None:
-            self.offset = offset_val + n
-        return out
+
+
+def generate_philox_raw_u32(
+    out: torch.Tensor,
+    generator: PhiloxGenerator,
+    *,
+    seed: int | None = None,
+    offset: int | None = None,
+    block_size: int = 512,
+    num_warps: int = 4,
+) -> torch.Tensor:
+    n = out.numel()
+    if not out.is_contiguous():
+        raise ValueError("Philox: output must be contiguous.")
+    if n % 4 != 0:
+        raise ValueError(
+            f"Philox: element count must be a multiple of 4, got {n}."
+        )
+    if block_size <= 0:
+        raise ValueError(f"Philox: block_size must be > 0, got {block_size}.")
+    if num_warps <= 0:
+        raise ValueError(f"Philox: num_warps must be > 0, got {num_warps}.")
+
+    seed_val = generator.seed if seed is None else int(seed)
+    offset_val = generator.offset if offset is None else int(offset)
+    if offset_val < 0:
+        raise ValueError(f"Philox: offset must be >= 0, got {offset_val}.")
+    if offset_val % 4 != 0:
+        raise ValueError(
+            f"Philox: offset is measured in uint32 outputs and must be "
+            f"a multiple of 4 for vectorized Philox4, got {offset_val}."
+        )
+
+    if n:
+        n_counters = n // 4
+        base_counter = offset_val // 4
+        grid = triton.cdiv(n_counters, block_size)
+        _PHILOX_RAW_LAUNCHER.launch(
+            grid,
+            (out, seed_val, base_counter, n_counters),
+            (block_size,),
+            (num_warps,),
+        )
+    if seed is None and offset is None:
+        generator.offset = offset_val + n
+    return out
