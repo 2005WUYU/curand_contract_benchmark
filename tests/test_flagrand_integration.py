@@ -153,6 +153,75 @@ class FlagRandIntegrationTests(unittest.TestCase):
         ):
             self.assertIn(name, distributions)
 
+    def test_rtx4060_gate_matrix_exactly_matches_h20_matrix(self) -> None:
+        args = types.SimpleNamespace(
+            generators="all",
+            distributions="all",
+            sizes="profile",
+            poisson_lambdas="profile",
+            qrng_dimensions=1,
+            offset=0,
+        )
+        rtx_cases = hostapi_only_benchmark.build_cases(
+            args,
+            hostapi_only_benchmark.HOSTAPI_PROFILES["rtx4060_gate"],
+        )
+        h20_cases = hostapi_only_benchmark.build_cases(
+            args,
+            hostapi_only_benchmark.HOSTAPI_PROFILES["h20"],
+        )
+        self.assertEqual(len(rtx_cases), 588)
+        self.assertEqual(
+            [case.to_record() for case in rtx_cases],
+            [case.to_record() for case in h20_cases],
+        )
+
+    def test_batch_call_count_caps_work_for_large_cases(self) -> None:
+        profile = hostapi_only_benchmark.HOSTAPI_PROFILES["h20"]
+        args = types.SimpleNamespace(
+            batch_calls=None,
+            batch_target_items=None,
+            batch_repeats=None,
+        )
+        small = types.SimpleNamespace(n=4096)
+        large = types.SimpleNamespace(n=8388608)
+        self.assertEqual(hostapi_only_benchmark._batch_calls(small, args, profile), 32)
+        self.assertEqual(hostapi_only_benchmark._batch_calls(large, args, profile), 2)
+
+    def test_hostapi_speedups_separate_dispatch_batch_and_residual_views(self) -> None:
+        records = [
+            {
+                "case_id": "case",
+                "backend": "curand_host_api",
+                "status": "ok",
+                "median_gpu_us": 10.0,
+                "median_wall_sync_us": 14.0,
+                "median_cpu_enqueue_us": 6.0,
+                "diagnostic_median_gpu_minus_enqueue_us": 4.0,
+                "batch_median_gpu_us_per_call": 8.0,
+                "batch_median_wall_sync_us_per_call": 9.0,
+                "batch_median_cpu_enqueue_us_per_call": 5.0,
+            },
+            {
+                "case_id": "case",
+                "backend": "flagrand_public_api",
+                "status": "ok",
+                "median_gpu_us": 30.0,
+                "median_wall_sync_us": 35.0,
+                "median_cpu_enqueue_us": 27.0,
+                "diagnostic_median_gpu_minus_enqueue_us": 3.0,
+                "batch_median_gpu_us_per_call": 12.0,
+                "batch_median_wall_sync_us_per_call": 13.0,
+                "batch_median_cpu_enqueue_us_per_call": 10.0,
+            },
+        ]
+        hostapi_only_benchmark._add_speedups(records)
+        candidate = records[1]
+        self.assertAlmostEqual(candidate["speedup_gpu_vs_curand_host"], 1.0 / 3.0)
+        self.assertAlmostEqual(candidate["speedup_cpu_enqueue_vs_curand_host"], 6.0 / 27.0)
+        self.assertAlmostEqual(candidate["speedup_batch_gpu_vs_curand_host"], 2.0 / 3.0)
+        self.assertAlmostEqual(candidate["diagnostic_residual_speedup_vs_curand_host"], 4.0 / 3.0)
+
     def test_hostapi_matrix_uses_only_f64_distributions_for_sobol64(self) -> None:
         sobol64 = hostapi_only_benchmark.GENERATOR_INFOS["sobol64"]
         distributions = hostapi_only_benchmark._expand_distributions(

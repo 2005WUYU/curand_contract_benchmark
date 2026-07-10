@@ -26,7 +26,10 @@ import torch  # noqa: E402
 
 from contract_benchmark.generator_registry import GENERATOR_INFOS, GeneratorInfo  # noqa: E402
 from contract_benchmark.runtime_env import configure_writable_cache  # noqa: E402
-from contract_benchmark.timing import collect_cuda_event_and_wall_us  # noqa: E402
+from contract_benchmark.timing import (  # noqa: E402
+    collect_batched_cuda_event_and_wall_us,
+    collect_cuda_event_and_wall_us,
+)
 from contract_benchmark.validation import (  # noqa: E402
     validate_lognormal,
     validate_normal,
@@ -43,6 +46,9 @@ class HostApiProfile:
     warmup: int
     repeats: int
     poisson_lambdas: list[float]
+    batch_calls: int
+    batch_target_items: int
+    batch_repeats: int
 
 
 HOSTAPI_PROFILES = {
@@ -52,6 +58,9 @@ HOSTAPI_PROFILES = {
         warmup=1,
         repeats=3,
         poisson_lambdas=[1.0, 10.0],
+        batch_calls=8,
+        batch_target_items=1 << 20,
+        batch_repeats=2,
     ),
     "local": HostApiProfile(
         name="local",
@@ -59,6 +68,19 @@ HOSTAPI_PROFILES = {
         warmup=3,
         repeats=10,
         poisson_lambdas=[0.1, 1.0, 10.0, 64.0],
+        batch_calls=32,
+        batch_target_items=1 << 24,
+        batch_repeats=5,
+    ),
+    "rtx4060_gate": HostApiProfile(
+        name="rtx4060_gate",
+        sizes=[4096, 16384, 65536, 262144, 1048576, 4194304, 8388608],
+        warmup=5,
+        repeats=20,
+        poisson_lambdas=[0.1, 1.0, 4.0, 10.0, 32.0, 64.0, 256.0, 1024.0, 10000.0],
+        batch_calls=32,
+        batch_target_items=1 << 24,
+        batch_repeats=5,
     ),
     "h20": HostApiProfile(
         name="h20",
@@ -66,6 +88,9 @@ HOSTAPI_PROFILES = {
         warmup=5,
         repeats=20,
         poisson_lambdas=[0.1, 1.0, 4.0, 10.0, 32.0, 64.0, 256.0, 1024.0, 10000.0],
+        batch_calls=32,
+        batch_target_items=1 << 24,
+        batch_repeats=5,
     ),
 }
 
@@ -118,6 +143,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--poisson-lambdas", default=os.environ.get("HOSTAPI_POISSON_LAMBDAS", "profile"))
     parser.add_argument("--warmup", type=int, default=_optional_int_env("HOSTAPI_WARMUP"))
     parser.add_argument("--repeats", type=int, default=_optional_int_env("HOSTAPI_REPEATS"))
+    parser.add_argument("--batch-calls", type=int, default=_optional_int_env("HOSTAPI_BATCH_CALLS"))
+    parser.add_argument("--batch-target-items", type=int, default=_optional_int_env("HOSTAPI_BATCH_TARGET_ITEMS"))
+    parser.add_argument("--batch-repeats", type=int, default=_optional_int_env("HOSTAPI_BATCH_REPEATS"))
     parser.add_argument("--seed", type=int, default=int(os.environ.get("HOSTAPI_SEED", "12345")))
     parser.add_argument(
         "--offset",
@@ -346,6 +374,11 @@ def run_single(
     _configure_runtime_cache(run_dir, shard=args.shard_index)
     print(f"[hostapi-only] results: {run_dir}", flush=True)
     print(f"[hostapi-only] profile={profile.name} cases={len(cases)} warmup={_warmup(args, profile)} repeats={_repeats(args, profile)}", flush=True)
+    print(
+        f"[hostapi-only] batch max_calls={_batch_max_calls(args, profile)} "
+        f"target_items={_batch_target_items(args, profile)} repeats={_batch_repeats(args, profile)}",
+        flush=True,
+    )
 
     records: list[dict[str, Any]] = []
     for local_index, case in enumerate(cases, start=1):
@@ -424,7 +457,22 @@ def run_backend(
             warmup_iters=_warmup(args, profile),
             repeats=_repeats(args, profile),
         )
-        return _timed_record(case, backend, timing, validation, args=args)
+        batch_calls = _batch_calls(case, args, profile)
+        batch_timing = collect_batched_cuda_event_and_wall_us(
+            run_once,
+            warmup_iters=_warmup(args, profile),
+            repeats=_batch_repeats(args, profile),
+            batch_calls=batch_calls,
+        )
+        return _timed_record(
+            case,
+            backend,
+            timing,
+            batch_timing,
+            batch_calls,
+            validation,
+            args=args,
+        )
     except Exception as exc:
         return _exception_record(case, backend, exc, args=args)
     finally:
@@ -458,13 +506,25 @@ def _timed_record(
     case: HostApiCase,
     backend: str,
     timing: Any,
+    batch_timing: Any,
+    batch_calls: int,
     validation: dict[str, Any],
     *,
     args: argparse.Namespace,
 ) -> dict[str, Any]:
     timing_record = timing.to_record()
+    batch_timing_record = batch_timing.to_record()
+    batch_timing_record.update(
+        {
+            "batch_calls": batch_calls,
+            "sample_unit": "microseconds_per_call",
+            "interpretation": "steady_state_stream_throughput_including_host_submission_gaps",
+        }
+    )
     median_gpu_us = timing_record.get("median_gpu_us")
     median_wall_us = timing_record.get("median_wall_sync_us")
+    median_enqueue_us = timing_record.get("median_cpu_enqueue_us")
+    diagnostic_residual_us = _diagnostic_gpu_minus_enqueue_us(median_gpu_us, median_enqueue_us)
     output_bytes = case.n * torch.empty((), dtype=case.torch_dtype).element_size()
     execution = _execution_metadata(case, backend)
     return {
@@ -480,9 +540,15 @@ def _timed_record(
         "output_bytes": output_bytes,
         **execution,
         "timing": timing_record,
+        "batch_timing": batch_timing_record,
         "median_gpu_us": median_gpu_us,
         "median_wall_sync_us": median_wall_us,
-        "median_cpu_enqueue_us": timing_record.get("median_cpu_enqueue_us"),
+        "median_cpu_enqueue_us": median_enqueue_us,
+        "diagnostic_median_gpu_minus_enqueue_us": diagnostic_residual_us,
+        "batch_calls": batch_calls,
+        "batch_median_gpu_us_per_call": batch_timing_record.get("median_gpu_us"),
+        "batch_median_wall_sync_us_per_call": batch_timing_record.get("median_wall_sync_us"),
+        "batch_median_cpu_enqueue_us_per_call": batch_timing_record.get("median_cpu_enqueue_us"),
         "items_per_second_gpu": _rate(case.n, median_gpu_us),
         "gib_per_second_gpu": _rate(output_bytes / (1024.0**3), median_gpu_us),
         "items_per_second_wall": _rate(case.n, median_wall_us),
@@ -516,9 +582,15 @@ def _exception_record(
         "output_bytes": case.n * torch.empty((), dtype=case.torch_dtype).element_size(),
         **execution,
         "timing": {},
+        "batch_timing": {},
         "median_gpu_us": None,
         "median_wall_sync_us": None,
         "median_cpu_enqueue_us": None,
+        "diagnostic_median_gpu_minus_enqueue_us": None,
+        "batch_calls": None,
+        "batch_median_gpu_us_per_call": None,
+        "batch_median_wall_sync_us_per_call": None,
+        "batch_median_cpu_enqueue_us_per_call": None,
         "items_per_second_gpu": None,
         "gib_per_second_gpu": None,
         "items_per_second_wall": None,
@@ -542,11 +614,8 @@ def summarize_records(
         backend_status_counts[backend][status] = backend_status_counts[backend].get(status, 0) + 1
 
     paired = _paired_success_records(records)
-    speedups = [
-        float(record["speedup_gpu_vs_curand_host"])
-        for record in paired
-        if record.get("backend") == "flagrand_public_api" and record.get("speedup_gpu_vs_curand_host") is not None
-    ]
+    paired_flagrand = [record for record in paired if record.get("backend") == "flagrand_public_api"]
+    speedups = _metric_values(paired_flagrand, "speedup_gpu_vs_curand_host")
     non_ok_record_count = sum(count for status, count in status_counts.items() if status != "ok")
     return {
         "benchmark": BENCHMARK_NAME,
@@ -557,6 +626,10 @@ def summarize_records(
         "status_counts": status_counts,
         "backend_status_counts": backend_status_counts,
         "speedup_gpu_vs_curand_host": _sample_summary(speedups),
+        "timing_views": _timing_view_summary(records, paired_flagrand),
+        "speedup_by_size": _grouped_speedup_summary(paired_flagrand, "N"),
+        "speedup_by_generator": _grouped_speedup_summary(paired_flagrand, "generator"),
+        "speedup_by_path_kind": _grouped_speedup_summary(paired_flagrand, "path_kind"),
         "failures": failures,
         "run_health": {
             "status": "ok" if not failures and non_ok_record_count == 0 else "needs_attention",
@@ -579,11 +652,41 @@ def _add_speedups(records: list[dict[str, Any]]) -> None:
             continue
         baseline_gpu = baseline.get("median_gpu_us")
         baseline_wall = baseline.get("median_wall_sync_us")
+        baseline_enqueue = baseline.get("median_cpu_enqueue_us")
+        baseline_residual = baseline.get("diagnostic_median_gpu_minus_enqueue_us")
+        baseline_batch_gpu = baseline.get("batch_median_gpu_us_per_call")
+        baseline_batch_wall = baseline.get("batch_median_wall_sync_us_per_call")
+        baseline_batch_enqueue = baseline.get("batch_median_cpu_enqueue_us_per_call")
         for record in backends.values():
             record["curand_host_median_gpu_us"] = baseline_gpu
             record["curand_host_median_wall_sync_us"] = baseline_wall
+            record["curand_host_median_cpu_enqueue_us"] = baseline_enqueue
+            record["curand_host_diagnostic_median_gpu_minus_enqueue_us"] = baseline_residual
+            record["curand_host_batch_median_gpu_us_per_call"] = baseline_batch_gpu
+            record["curand_host_batch_median_wall_sync_us_per_call"] = baseline_batch_wall
+            record["curand_host_batch_median_cpu_enqueue_us_per_call"] = baseline_batch_enqueue
             record["speedup_gpu_vs_curand_host"] = _speedup(baseline_gpu, record.get("median_gpu_us"))
             record["speedup_wall_vs_curand_host"] = _speedup(baseline_wall, record.get("median_wall_sync_us"))
+            record["speedup_cpu_enqueue_vs_curand_host"] = _speedup(
+                baseline_enqueue,
+                record.get("median_cpu_enqueue_us"),
+            )
+            record["diagnostic_residual_speedup_vs_curand_host"] = _speedup(
+                baseline_residual,
+                record.get("diagnostic_median_gpu_minus_enqueue_us"),
+            )
+            record["speedup_batch_gpu_vs_curand_host"] = _speedup(
+                baseline_batch_gpu,
+                record.get("batch_median_gpu_us_per_call"),
+            )
+            record["speedup_batch_wall_vs_curand_host"] = _speedup(
+                baseline_batch_wall,
+                record.get("batch_median_wall_sync_us_per_call"),
+            )
+            record["speedup_batch_cpu_enqueue_vs_curand_host"] = _speedup(
+                baseline_batch_enqueue,
+                record.get("batch_median_cpu_enqueue_us_per_call"),
+            )
 
 
 def _paired_success_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -597,6 +700,113 @@ def _paired_success_records(records: list[dict[str, Any]]) -> list[dict[str, Any
         if curand and flagrand and curand.get("status") == "ok" and flagrand.get("status") == "ok":
             paired.extend([curand, flagrand])
     return paired
+
+
+def _metric_values(records: list[dict[str, Any]], field: str) -> list[float]:
+    values: list[float] = []
+    for record in records:
+        value = record.get(field)
+        if value is None:
+            continue
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(number):
+            values.append(number)
+    return values
+
+
+def _timing_view_summary(
+    records: list[dict[str, Any]],
+    paired_flagrand: list[dict[str, Any]],
+) -> dict[str, Any]:
+    residual_values = _metric_values(
+        paired_flagrand,
+        "diagnostic_residual_speedup_vs_curand_host",
+    )
+    residual_at_least_90 = sum(value >= 0.9 for value in residual_values)
+    backend_medians: dict[str, dict[str, Any]] = {}
+    for backend in ("curand_host_api", "flagrand_public_api"):
+        backend_records = [
+            record
+            for record in records
+            if record.get("backend") == backend and record.get("status") == "ok"
+        ]
+        backend_medians[backend] = {
+            "single_call_cuda_event_us": _sample_summary(
+                _metric_values(backend_records, "median_gpu_us")
+            ),
+            "single_call_wall_sync_us": _sample_summary(
+                _metric_values(backend_records, "median_wall_sync_us")
+            ),
+            "single_call_cpu_enqueue_us": _sample_summary(
+                _metric_values(backend_records, "median_cpu_enqueue_us")
+            ),
+            "batch_event_us_per_call": _sample_summary(
+                _metric_values(backend_records, "batch_median_gpu_us_per_call")
+            ),
+            "batch_cpu_enqueue_us_per_call": _sample_summary(
+                _metric_values(backend_records, "batch_median_cpu_enqueue_us_per_call")
+            ),
+        }
+    return {
+        "single_call_cuda_event_speedup": _sample_summary(
+            _metric_values(paired_flagrand, "speedup_gpu_vs_curand_host")
+        ),
+        "single_call_wall_sync_speedup": _sample_summary(
+            _metric_values(paired_flagrand, "speedup_wall_vs_curand_host")
+        ),
+        "single_call_cpu_enqueue_speedup": _sample_summary(
+            _metric_values(paired_flagrand, "speedup_cpu_enqueue_vs_curand_host")
+        ),
+        "batch_event_speedup": _sample_summary(
+            _metric_values(paired_flagrand, "speedup_batch_gpu_vs_curand_host")
+        ),
+        "batch_wall_sync_speedup": _sample_summary(
+            _metric_values(paired_flagrand, "speedup_batch_wall_vs_curand_host")
+        ),
+        "diagnostic_gpu_minus_enqueue_speedup": _sample_summary(residual_values),
+        "diagnostic_residual_at_least_0_9": {
+            "count": residual_at_least_90,
+            "total": len(residual_values),
+            "fraction": residual_at_least_90 / len(residual_values) if residual_values else None,
+        },
+        "backend_medians": backend_medians,
+        "interpretation": {
+            "single_call_cuda_event": "includes GPU idle time while the host submits work between the two events",
+            "batch_event": "per-call steady-state stream time; includes host submission gaps but amortizes event/sync sampling overhead",
+            "gpu_minus_enqueue": "diagnostic subtraction of independent medians; not a formal pure-kernel measurement",
+            "fused_tasks": "reported by the full contract benchmark, not by hostapi_only",
+        },
+    }
+
+
+def _grouped_speedup_summary(records: list[dict[str, Any]], group_field: str) -> dict[str, Any]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for record in records:
+        grouped.setdefault(str(record.get(group_field)), []).append(record)
+    result: dict[str, Any] = {}
+    for group, group_records in grouped.items():
+        result[group] = {
+            "case_count": len(group_records),
+            "single_call_cuda_event": _sample_summary(
+                _metric_values(group_records, "speedup_gpu_vs_curand_host")
+            ),
+            "single_call_wall_sync": _sample_summary(
+                _metric_values(group_records, "speedup_wall_vs_curand_host")
+            ),
+            "cpu_enqueue": _sample_summary(
+                _metric_values(group_records, "speedup_cpu_enqueue_vs_curand_host")
+            ),
+            "batch_event": _sample_summary(
+                _metric_values(group_records, "speedup_batch_gpu_vs_curand_host")
+            ),
+            "diagnostic_gpu_minus_enqueue": _sample_summary(
+                _metric_values(group_records, "diagnostic_residual_speedup_vs_curand_host")
+            ),
+        }
+    return result
 
 
 def collect_host_environment(
@@ -622,6 +832,18 @@ def collect_host_environment(
             "elapsed_seconds": ended_unix - started_unix,
         },
         "args": _serializable_args(args),
+        "timing_plan": {
+            "single_call": {
+                "warmup": _warmup(args, profile),
+                "repeats": _repeats(args, profile),
+            },
+            "batch_event": {
+                "max_calls": _batch_max_calls(args, profile),
+                "target_items": _batch_target_items(args, profile),
+                "repeats": _batch_repeats(args, profile),
+                "per_case_rule": "max(1, min(max_calls, target_items // N))",
+            },
+        },
         "git": _git_info(),
     }
     if torch.cuda.is_available():
@@ -680,6 +902,8 @@ def _write_report(path: Path, records: list[dict[str, Any]], summary: dict[str, 
     largest_rows = [record for record in paired_flagrand if largest_n is not None and int(record["N"]) == largest_n]
     worst_rows = sorted(paired_flagrand, key=lambda r: float(r.get("speedup_gpu_vs_curand_host") or 0.0))[:20]
     best_rows = sorted(paired_flagrand, key=lambda r: float(r.get("speedup_gpu_vs_curand_host") or 0.0), reverse=True)[:20]
+    timing_views = summary.get("timing_views", {})
+    residual_coverage = timing_views.get("diagnostic_residual_at_least_0_9", {})
 
     lines = [
         "# Host API Only Benchmark Report",
@@ -707,10 +931,18 @@ def _write_report(path: Path, records: list[dict[str, Any]], summary: dict[str, 
         f"- run health: `{summary.get('run_health', {}).get('status')}`",
         f"- status counts: `{json.dumps(summary.get('status_counts', {}), sort_keys=True)}`",
         f"- speedup gpu vs cuRAND Host median summary: `{json.dumps(summary.get('speedup_gpu_vs_curand_host', {}), sort_keys=True)}`",
+        f"- CPU enqueue speedup median summary: `{json.dumps(timing_views.get('single_call_cpu_enqueue_speedup', {}), sort_keys=True)}`",
+        f"- batched-event speedup median summary: `{json.dumps(timing_views.get('batch_event_speedup', {}), sort_keys=True)}`",
+        f"- diagnostic GPU-minus-enqueue speedup median summary: `{json.dumps(timing_views.get('diagnostic_gpu_minus_enqueue_speedup', {}), sort_keys=True)}`",
+        f"- diagnostic residual >= 0.9x: `{residual_coverage.get('count')}/{residual_coverage.get('total')}`",
         "",
-        "## Largest-N Paired Results",
+        "## Speedup by Size",
         "",
     ]
+    lines.extend(_group_summary_markdown_table(summary.get("speedup_by_size", {}), "N"))
+    lines.extend(["", "## Speedup by FlagRand Path", ""])
+    lines.extend(_group_summary_markdown_table(summary.get("speedup_by_path_kind", {}), "path"))
+    lines.extend(["", "## Largest-N Paired Results", ""])
     lines.extend(_markdown_table(largest_rows, limit=80))
     lines.extend(["", "## Slowest FlagRand Relative Cases", ""])
     lines.extend(_markdown_table(worst_rows, limit=20))
@@ -726,6 +958,9 @@ def _write_report(path: Path, records: list[dict[str, Any]], summary: dict[str, 
             "## Interpretation Notes",
             "",
             "- `speedup_gpu_vs_curand_host > 1` means FlagRand was faster than cuRAND Host API by CUDA-event median.",
+            "- Single-call CUDA events include GPU idle time while Python/Triton submits work between the start and end events.",
+            "- Batched-event values are per-call steady-state stream times. They amortize event/sync sampling overhead but still include host submission gaps and are not pure kernel timings.",
+            "- `diagnostic_median_gpu_minus_enqueue_us` subtracts two independent medians. It is useful for dispatch diagnosis only and must not be reported as a formal kernel time.",
             "- `path_kind`, `kernel_launch_count_estimate`, and `temporary_bytes` are recorded per row to distinguish direct public paths from raw-plus-transform paths.",
             "- Dynamic stateful MT19937/MTGP32 launch counts are recorded as `null` rather than reported with a misleading fixed estimate.",
             "- Benchmark-local fused consumer kernels belong to the full task benchmark and are not part of this host-API-only comparison.",
@@ -740,12 +975,12 @@ def _markdown_table(records: list[dict[str, Any]], *, limit: int) -> list[str]:
     if not records:
         return ["No paired rows."]
     lines = [
-        "| generator | distribution | path | semantic | N | params | curand_gpu_us | flagrand_gpu_us | speedup_gpu | flagrand_wall_us |",
-        "|---|---:|---|---|---:|---|---:|---:|---:|---:|",
+        "| generator | distribution | path | semantic | N | params | curand_gpu_us | flagrand_gpu_us | speedup_gpu | enqueue_us | batch_us/call | batch_speedup | residual_speedup |",
+        "|---|---|---|---|---:|---|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for record in records[:limit]:
         lines.append(
-            "| {generator} | {distribution} | {path} | {semantic} | {n} | `{params}` | {curand_gpu} | {flagrand_gpu} | {speedup} | {wall} |".format(
+            "| {generator} | {distribution} | {path} | {semantic} | {n} | `{params}` | {curand_gpu} | {flagrand_gpu} | {speedup} | {enqueue} | {batch_gpu} | {batch_speedup} | {residual_speedup} |".format(
                 generator=record["generator"],
                 distribution=record["distribution"],
                 path=record.get("path_kind"),
@@ -755,12 +990,45 @@ def _markdown_table(records: list[dict[str, Any]], *, limit: int) -> list[str]:
                 curand_gpu=_fmt(record.get("curand_host_median_gpu_us")),
                 flagrand_gpu=_fmt(record.get("median_gpu_us")),
                 speedup=_fmt(record.get("speedup_gpu_vs_curand_host")),
-                wall=_fmt(record.get("median_wall_sync_us")),
+                enqueue=_fmt(record.get("median_cpu_enqueue_us")),
+                batch_gpu=_fmt(record.get("batch_median_gpu_us_per_call")),
+                batch_speedup=_fmt(record.get("speedup_batch_gpu_vs_curand_host")),
+                residual_speedup=_fmt(record.get("diagnostic_residual_speedup_vs_curand_host")),
             )
         )
     if len(records) > limit:
-        lines.append("| ... | ... | ... | ... | ... | ... | ... | ... | ... | ... |")
+        lines.append("| ... | ... | ... | ... | ... | ... | ... | ... | ... | ... | ... | ... | ... |")
     return lines
+
+
+def _group_summary_markdown_table(groups: dict[str, Any], label: str) -> list[str]:
+    if not groups:
+        return ["No paired rows."]
+    lines = [
+        f"| {label} | cases | single_event_speedup | wall_speedup | enqueue_speedup | batch_event_speedup | residual_speedup |",
+        "|---|---:|---:|---:|---:|---:|---:|",
+    ]
+    for group in sorted(groups, key=_natural_group_sort_key):
+        row = groups[group]
+        lines.append(
+            "| {group} | {cases} | {single} | {wall} | {enqueue} | {batch} | {residual} |".format(
+                group=group,
+                cases=row.get("case_count"),
+                single=_fmt(row.get("single_call_cuda_event", {}).get("median")),
+                wall=_fmt(row.get("single_call_wall_sync", {}).get("median")),
+                enqueue=_fmt(row.get("cpu_enqueue", {}).get("median")),
+                batch=_fmt(row.get("batch_event", {}).get("median")),
+                residual=_fmt(row.get("diagnostic_gpu_minus_enqueue", {}).get("median")),
+            )
+        )
+    return lines
+
+
+def _natural_group_sort_key(value: str) -> tuple[int, float | str]:
+    try:
+        return (0, float(value))
+    except (TypeError, ValueError):
+        return (1, value)
 
 
 def _non_ok_table(records: list[dict[str, Any]], *, limit: int) -> list[str]:
@@ -806,13 +1074,28 @@ def _write_csv(path: Path, records: list[dict[str, Any]]) -> None:
         "median_gpu_us",
         "median_wall_sync_us",
         "median_cpu_enqueue_us",
+        "diagnostic_median_gpu_minus_enqueue_us",
+        "batch_calls",
+        "batch_median_gpu_us_per_call",
+        "batch_median_wall_sync_us_per_call",
+        "batch_median_cpu_enqueue_us_per_call",
         "items_per_second_gpu",
         "gib_per_second_gpu",
         "items_per_second_wall",
         "speedup_gpu_vs_curand_host",
         "speedup_wall_vs_curand_host",
+        "speedup_cpu_enqueue_vs_curand_host",
+        "diagnostic_residual_speedup_vs_curand_host",
+        "speedup_batch_gpu_vs_curand_host",
+        "speedup_batch_wall_vs_curand_host",
+        "speedup_batch_cpu_enqueue_vs_curand_host",
         "curand_host_median_gpu_us",
         "curand_host_median_wall_sync_us",
+        "curand_host_median_cpu_enqueue_us",
+        "curand_host_diagnostic_median_gpu_minus_enqueue_us",
+        "curand_host_batch_median_gpu_us_per_call",
+        "curand_host_batch_median_wall_sync_us_per_call",
+        "curand_host_batch_median_cpu_enqueue_us_per_call",
         "output_bytes",
         "temporary_bytes",
         "generator_state_bytes_estimate",
@@ -1175,6 +1458,15 @@ def _speedup(baseline_us: Any, candidate_us: Any) -> float | None:
     return baseline / candidate
 
 
+def _diagnostic_gpu_minus_enqueue_us(gpu_us: Any, enqueue_us: Any) -> float | None:
+    if gpu_us is None or enqueue_us is None:
+        return None
+    residual = float(gpu_us) - float(enqueue_us)
+    if not math.isfinite(residual) or residual <= 0:
+        return None
+    return residual
+
+
 def _sample_summary(values: list[float]) -> dict[str, float | int | None]:
     if not values:
         return {"count": 0, "median": None, "min": None, "max": None}
@@ -1236,6 +1528,12 @@ def _child_command(args: argparse.Namespace, run_dir: Path, shard_index: int, sh
         command.extend(["--warmup", str(args.warmup)])
     if args.repeats is not None:
         command.extend(["--repeats", str(args.repeats)])
+    if args.batch_calls is not None:
+        command.extend(["--batch-calls", str(args.batch_calls)])
+    if args.batch_target_items is not None:
+        command.extend(["--batch-target-items", str(args.batch_target_items)])
+    if args.batch_repeats is not None:
+        command.extend(["--batch-repeats", str(args.batch_repeats)])
     if args.max_cases is not None:
         command.extend(["--max-cases", str(args.max_cases)])
     return command
@@ -1247,6 +1545,32 @@ def _warmup(args: argparse.Namespace, profile: HostApiProfile) -> int:
 
 def _repeats(args: argparse.Namespace, profile: HostApiProfile) -> int:
     return int(profile.repeats if args.repeats is None else args.repeats)
+
+
+def _batch_max_calls(args: argparse.Namespace, profile: HostApiProfile) -> int:
+    value = int(profile.batch_calls if args.batch_calls is None else args.batch_calls)
+    if value < 1:
+        raise ValueError(f"batch calls must be >= 1, got {value}")
+    return value
+
+
+def _batch_target_items(args: argparse.Namespace, profile: HostApiProfile) -> int:
+    value = int(profile.batch_target_items if args.batch_target_items is None else args.batch_target_items)
+    if value < 1:
+        raise ValueError(f"batch target items must be >= 1, got {value}")
+    return value
+
+
+def _batch_repeats(args: argparse.Namespace, profile: HostApiProfile) -> int:
+    value = int(profile.batch_repeats if args.batch_repeats is None else args.batch_repeats)
+    if value < 1:
+        raise ValueError(f"batch repeats must be >= 1, got {value}")
+    return value
+
+
+def _batch_calls(case: HostApiCase, args: argparse.Namespace, profile: HostApiProfile) -> int:
+    target_limited = max(1, _batch_target_items(args, profile) // max(1, case.n))
+    return min(_batch_max_calls(args, profile), target_limited)
 
 
 def _optional_int_env(name: str) -> int | None:

@@ -65,6 +65,20 @@ cuRAND Host API median CUDA-event time / FlagRand median CUDA-event time
 
 Values greater than `1.0` mean FlagRand was faster for that case.
 
+Every successful record now carries three complementary timing views:
+
+- single-call CUDA event, wall-sync, and CPU enqueue medians;
+- a batched CUDA-event steady-state value reported in microseconds per call;
+- `GPU event - CPU enqueue`, explicitly labeled as a diagnostic subtraction of
+  independent medians rather than a formal kernel time.
+
+The batched view uses at most 32 calls and caps each sample near 16M generated
+items (`max(1, min(32, 16777216 // N))` by default). This keeps large-N runs
+bounded while giving small calls enough queued work to expose steady-state
+stream throughput. CUDA events still include any GPU idle gaps caused by slow
+host submission, so the batched number must not be described as pure kernel
+execution time.
+
 ## Default Coverage
 
 For the `h20` profile, the default size list is:
@@ -160,6 +174,33 @@ Any runtime exception, validation failure, or unsupported row makes
 process is therefore not treated as a successful benchmark when the refactored
 API or a Triton kernel failed inside a case.
 
+## RTX Local Gate
+
+Use `rtx4060_gate` on the actual RTX4060 test machine for an exactly comparable
+case matrix. The current Mac development machine is only used to edit, validate
+the matrix, and push the code; it cannot execute the CUDA timing run. The profile
+has the same generators, distribution expansion, seven sizes, nine Poisson
+lambdas, warmup, and repeat counts as `h20`, producing 588 cases with the
+default selectors:
+
+```bash
+PROFILE=rtx4060_gate \
+NUM_GPUS=1 \
+python scripts/hostapi_only_benchmark.py
+```
+
+Before a long run, verify matrix parity without requiring CUDA execution:
+
+```bash
+python scripts/hostapi_only_benchmark.py --profile rtx4060_gate --list-cases > rtx4060_gate_cases.jsonl
+python scripts/hostapi_only_benchmark.py --profile h20 --list-cases > h20_cases.jsonl
+```
+
+The two files should be byte-for-byte identical. Use the full contract
+benchmark separately for fused threshold/add/dropout and bulk-consume task
+results; `hostapi_only` deliberately does not fold fused-task performance into
+its headline.
+
 ## Useful Narrow Runs
 
 Focus on the generators discussed most often:
@@ -207,3 +248,8 @@ Important files:
 
 For multi-GPU runs, the root directory also includes shard logs and
 `parallel_manifest.json`.
+
+`summary.json` and `REPORT.md` split the paired result by `N`, generator, and
+FlagRand `path_kind`. They report single-event, wall, enqueue, batched-event,
+and diagnostic residual speedups side by side so a submission-bound aggregate
+cannot be mistaken for a broad kernel regression.

@@ -115,6 +115,56 @@ def collect_cuda_event_and_wall_us(
     )
 
 
+def collect_batched_cuda_event_and_wall_us(
+    run_once: Callable[[], object],
+    *,
+    warmup_iters: int,
+    repeats: int,
+    batch_calls: int,
+    stream: torch.cuda.Stream | None = None,
+) -> TimingResult:
+    """Measure a batch of calls and report per-call samples.
+
+    The CUDA-event interval still contains host submission gaps. Batching removes
+    per-sample event creation/synchronization from the reported per-call value and
+    shows steady-state stream throughput, but it is not a pure kernel timer.
+    """
+    if batch_calls < 1:
+        raise ValueError(f"batch_calls must be >= 1, got {batch_calls}")
+    if stream is None:
+        stream = torch.cuda.current_stream()
+    warmup(run_once, warmup_iters=warmup_iters)
+    gpu_samples: list[float] = []
+    wall_samples: list[float] = []
+    enqueue_samples: list[float] = []
+    for _ in range(repeats):
+        torch.cuda.synchronize()
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        wall_t0 = time.perf_counter()
+        start.record(stream)
+        enqueue_t0 = time.perf_counter()
+        for _ in range(batch_calls):
+            run_once()
+        enqueue_t1 = time.perf_counter()
+        end.record(stream)
+        end.synchronize()
+        wall_t1 = time.perf_counter()
+        scale = 1.0 / float(batch_calls)
+        gpu_samples.append(float(start.elapsed_time(end)) * 1000.0 * scale)
+        wall_samples.append((wall_t1 - wall_t0) * 1_000_000.0 * scale)
+        enqueue_samples.append((enqueue_t1 - enqueue_t0) * 1_000_000.0 * scale)
+    return TimingResult(
+        timer="batched_cuda_event_same_stream_per_call",
+        raw_samples_us=gpu_samples,
+        wall_sync_samples_us=wall_samples,
+        cpu_enqueue_samples_us=enqueue_samples,
+        gpu=summarize_us(gpu_samples),
+        wall=summarize_us(wall_samples),
+        cpu_enqueue=summarize_us(enqueue_samples),
+    )
+
+
 def collect_wall_only_us(
     run_once: Callable[[], object],
     *,
@@ -172,4 +222,3 @@ def formal_result_from_flags(flags: list[str]) -> bool:
         "gpu_event_high_variability",
     }
     return not any(flag in blocking for flag in flags)
-
