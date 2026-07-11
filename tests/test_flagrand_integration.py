@@ -94,7 +94,7 @@ class FlagRandIntegrationTests(unittest.TestCase):
         self.assertEqual(digest, manifest["tree_sha256"])
         self.assertEqual(
             manifest["commit"],
-            "a5b9abdcfaa400cba9ead1504fc92a76efe2f30e",
+            "66b3ac6a59b593ba08db1900468239105d63a26b",
         )
 
     def test_generator_creation_uses_explicit_refactored_facade_mapping(self) -> None:

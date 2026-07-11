@@ -10,8 +10,9 @@ from flagrand.runtime import CachedKernelLauncher
 
 _BLOCK: int = 128
 _MIN_STATE_THREADS: int = 16384
-_MAX_STATE_THREADS: int = 65536
-_THREADS_PER_SM: int = 512
+_MAX_STATE_THREADS: int = 131072
+_SMALL_GPU_MAX_SMS: int = 32
+_THREADS_PER_LARGE_SM: int = 1024
 _SMALL_REQUEST_PREFETCH: int = 1 << 20
 _STATE_ROWS: int = 6
 _CACHE_NAMES = (
@@ -203,6 +204,8 @@ def _state_threads_for_device(device_index: int) -> int:
 
 
 def _resolve_state_threads(sm_count: int) -> int:
-    target = max(_MIN_STATE_THREADS, sm_count * _THREADS_PER_SM)
+    if sm_count <= _SMALL_GPU_MAX_SMS:
+        return _MIN_STATE_THREADS
+    target = sm_count * _THREADS_PER_LARGE_SM
     threads = 1 << (target - 1).bit_length()
     return min(threads, _MAX_STATE_THREADS)
