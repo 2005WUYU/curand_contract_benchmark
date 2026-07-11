@@ -9,6 +9,7 @@ from flagrand.fused._internal.state_prng_kernels import (
     uniform_kernel,
 )
 from flagrand.fused._internal.state_prng_state import RNG_MRG32K3A, RNG_XORWOW
+from flagrand.fused._internal.state_prng_raw import discard_state_prng_raw_sequence
 from flagrand.runtime import CachedKernelLauncher
 
 _BLOCK: int = 128
@@ -181,6 +182,7 @@ def _ceil_div(numerator: int, denominator: int) -> int:
 
 
 def _launch_seed_args(generator, op_name: str) -> tuple[int, int, int]:
+    discard_state_prng_raw_sequence(generator)
     offset_val = int(getattr(generator, "offset", 0))
     if offset_val < 0:
         raise ValueError(f"{op_name}: offset must be >= 0, got {offset_val}.")

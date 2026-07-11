@@ -6,12 +6,11 @@ import torch
 import triton
 import triton.language as tl
 
-from flagrand.rng._sequence import generate_chunked
 from flagrand.runtime import CachedKernelLauncher
+from flagrand.fused._internal.state_prng_raw import generate_mrg32k3a_raw
 
 _BLOCK: int = 128
 _TARGET_THREADS: int = 131072
-_SEQUENCE_CHUNK: int = 1 << 20
 
 
 @triton.jit
@@ -126,15 +125,7 @@ class Mrg32k3aGenerator:
             _launch_mrg32k3a(out, seed_val, offset_val)
             return out
 
-        generate_chunked(
-            self,
-            out,
-            start=offset_val,
-            chunk_size=_SEQUENCE_CHUNK,
-            cache_key=(seed_val, str(out.device), str(out.dtype)),
-            generate_chunk=lambda chunk, chunk_start: _launch_mrg32k3a(chunk, seed_val, chunk_start),
-        )
-        self.offset = offset_val + n
+        generate_mrg32k3a_raw(out, self)
         return out
 
 

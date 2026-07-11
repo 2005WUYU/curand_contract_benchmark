@@ -21,6 +21,46 @@ def _poisson_inverse_from_uniform(u, lambda_val, MAX_K: tl.constexpr):
 
 
 @triton.jit
+def raw_state_kernel(
+    out_ptr,
+    state_ptr,
+    seed_lo,
+    seed_hi,
+    start_offset_u32,
+    num_iters,
+    INIT_STATE: tl.constexpr,
+    STATE_THREADS: tl.constexpr,
+    BLOCK: tl.constexpr,
+    RNG_KIND: tl.constexpr,
+):
+    tid = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    active = tid < STATE_THREADS
+    if INIT_STATE:
+        s0, s1, s2, s3, s4, s5 = init_state(
+            seed_lo, seed_hi, tid, start_offset_u32, RNG_KIND
+        )
+    else:
+        s0 = tl.load(state_ptr + 0 * STATE_THREADS + tid, mask=active)
+        s1 = tl.load(state_ptr + 1 * STATE_THREADS + tid, mask=active)
+        s2 = tl.load(state_ptr + 2 * STATE_THREADS + tid, mask=active)
+        s3 = tl.load(state_ptr + 3 * STATE_THREADS + tid, mask=active)
+        s4 = tl.load(state_ptr + 4 * STATE_THREADS + tid, mask=active)
+        s5 = tl.load(state_ptr + 5 * STATE_THREADS + tid, mask=active)
+
+    for k in range(num_iters):
+        raw, s0, s1, s2, s3, s4, s5 = step_state(s0, s1, s2, s3, s4, s5, RNG_KIND)
+        out_offs = k * STATE_THREADS + tid
+        tl.store(out_ptr + out_offs, raw.to(tl.int32, bitcast=True), mask=active)
+
+    tl.store(state_ptr + 0 * STATE_THREADS + tid, s0, mask=active)
+    tl.store(state_ptr + 1 * STATE_THREADS + tid, s1, mask=active)
+    tl.store(state_ptr + 2 * STATE_THREADS + tid, s2, mask=active)
+    tl.store(state_ptr + 3 * STATE_THREADS + tid, s3, mask=active)
+    tl.store(state_ptr + 4 * STATE_THREADS + tid, s4, mask=active)
+    tl.store(state_ptr + 5 * STATE_THREADS + tid, s5, mask=active)
+
+
+@triton.jit
 def uniform_kernel(
     out_ptr,
     seed_lo,
