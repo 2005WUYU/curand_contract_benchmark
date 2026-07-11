@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from functools import lru_cache
+
 import torch
 
 from flagrand.fused._internal.state_prng_kernels import raw_state_kernel
@@ -7,7 +9,10 @@ from flagrand.fused._internal.state_prng_state import RNG_MRG32K3A, RNG_XORWOW
 from flagrand.runtime import CachedKernelLauncher
 
 _BLOCK: int = 128
-_STATE_THREADS: int = 16384
+_MIN_STATE_THREADS: int = 16384
+_MAX_STATE_THREADS: int = 65536
+_THREADS_PER_SM: int = 512
+_SMALL_REQUEST_PREFETCH: int = 1 << 20
 _STATE_ROWS: int = 6
 _CACHE_NAMES = (
     "_raw_sequence_key",
@@ -47,7 +52,8 @@ def _generate_raw(out: torch.Tensor, generator, rng_kind: int, name: str) -> Non
     if offset < 0:
         raise ValueError(f"{name}: offset must be >= 0, got {offset}.")
     seed = int(getattr(generator, "seed", 0))
-    key = (seed, str(out.device), str(out.dtype), rng_kind)
+    state_threads = _state_threads_for_output(out)
+    key = (seed, str(out.device), str(out.dtype), rng_kind, state_threads)
     if getattr(generator, "_raw_sequence_key", None) != key:
         discard_state_prng_raw_sequence(generator)
         generator._raw_sequence_key = key
@@ -65,14 +71,38 @@ def _generate_raw(out: torch.Tensor, generator, rng_kind: int, name: str) -> Non
     initialize = state is None or state_offset != offset
     if initialize:
         state = torch.empty(
-            (_STATE_ROWS, _STATE_THREADS),
+            (_STATE_ROWS, state_threads),
             device=out.device,
             dtype=torch.int64,
         )
 
-    full_rounds = remaining // _STATE_THREADS
+    if remaining < _SMALL_REQUEST_PREFETCH:
+        prefetch = torch.empty(
+            _SMALL_REQUEST_PREFETCH,
+            device=out.device,
+            dtype=torch.int32,
+        )
+        _launch_raw_state(
+            prefetch,
+            state,
+            seed,
+            offset,
+            _SMALL_REQUEST_PREFETCH // state_threads,
+            initialize,
+            rng_kind,
+            state_threads,
+        )
+        flat[written:].copy_(prefetch[:remaining])
+        generator._raw_sequence_pending = prefetch
+        generator._raw_sequence_pending_offset = offset + remaining
+        generator._raw_sequence_state = state
+        generator._raw_sequence_state_offset = offset + _SMALL_REQUEST_PREFETCH
+        generator.offset = offset + remaining
+        return
+
+    full_rounds = remaining // state_threads
     if full_rounds:
-        count = full_rounds * _STATE_THREADS
+        count = full_rounds * state_threads
         _launch_raw_state(
             flat[written : written + count],
             state,
@@ -81,6 +111,7 @@ def _generate_raw(out: torch.Tensor, generator, rng_kind: int, name: str) -> Non
             full_rounds,
             initialize,
             rng_kind,
+            state_threads,
         )
         initialize = False
         written += count
@@ -88,12 +119,21 @@ def _generate_raw(out: torch.Tensor, generator, rng_kind: int, name: str) -> Non
         remaining -= count
 
     if remaining:
-        pending = torch.empty(_STATE_THREADS, device=out.device, dtype=torch.int32)
-        _launch_raw_state(pending, state, seed, offset, 1, initialize, rng_kind)
+        pending = torch.empty(state_threads, device=out.device, dtype=torch.int32)
+        _launch_raw_state(
+            pending,
+            state,
+            seed,
+            offset,
+            1,
+            initialize,
+            rng_kind,
+            state_threads,
+        )
         flat[written:].copy_(pending[:remaining])
         generator._raw_sequence_pending = pending
         generator._raw_sequence_pending_offset = offset + remaining
-        state_offset = offset + _STATE_THREADS
+        state_offset = offset + state_threads
         offset += remaining
     else:
         state_offset = offset
@@ -132,9 +172,10 @@ def _launch_raw_state(
     num_iters: int,
     initialize: bool,
     rng_kind: int,
+    state_threads: int,
 ) -> None:
     _RAW_STATE_LAUNCHER.launch(
-        (_STATE_THREADS // _BLOCK,),
+        (state_threads // _BLOCK,),
         (
             out,
             state,
@@ -143,6 +184,25 @@ def _launch_raw_state(
             offset & 0xFFFFFFFF,
             num_iters,
         ),
-        (initialize, _STATE_THREADS, _BLOCK, rng_kind),
+        (initialize, state_threads, _BLOCK, rng_kind),
         (4,),
     )
+
+
+def _state_threads_for_output(out: torch.Tensor) -> int:
+    device_index = out.device.index
+    if device_index is None:
+        device_index = torch.cuda.current_device()
+    return _state_threads_for_device(device_index)
+
+
+@lru_cache(maxsize=None)
+def _state_threads_for_device(device_index: int) -> int:
+    sm_count = torch.cuda.get_device_properties(device_index).multi_processor_count
+    return _resolve_state_threads(sm_count)
+
+
+def _resolve_state_threads(sm_count: int) -> int:
+    target = max(_MIN_STATE_THREADS, sm_count * _THREADS_PER_SM)
+    threads = 1 << (target - 1).bit_length()
+    return min(threads, _MAX_STATE_THREADS)
