@@ -7,5 +7,5 @@
   "api_surface": "flagrand.curand",
   "tree_hash_algorithm": "sha256 over sorted .py/.pt files as relative POSIX path + NUL + file bytes",
   "tree_file_count": 63,
-  "tree_sha256": "740f38d89443c17ae391ae4f58b9e0d36be3286608cf8c31a4a80b5931e601a3"
+  "tree_sha256": "b74c5c9f1c1413ce46b663f7290c08821e7a4799a27a0ccc369af7cb200b92e8"
 }
